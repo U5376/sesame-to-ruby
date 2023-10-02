@@ -77,7 +77,7 @@ class EpubProcessor:
         self.initialize_tooltip_content()        
 
         # 添加勾选框以启用/禁用功能
-        modify_html_check_button = tk.Checkbutton(root, text="傍点转换ruby格式", variable=self.modify_html_enabled, onvalue=True, offvalue=False, state='disabled', font=("宋体", 12))
+        modify_html_check_button = tk.Checkbutton(root, text="傍点转换ruby格式", variable=self.modify_html_enabled, onvalue=True, offvalue=False, font=("宋体", 12))
         process_ruby_check_button = tk.Checkbutton(root, text="Ruby格式规格化", variable=self.process_ruby_enabled, onvalue=True, offvalue=False, font=("宋体", 12))
         process_images_check_button = tk.Checkbutton(root, text="图片标签多看交互规格化", variable=self.process_images_enabled, onvalue=True, offvalue=False, font=("宋体", 12))
 
@@ -91,11 +91,12 @@ class EpubProcessor:
         # 在这里填写您需要展示的说明内容
         self.description = """
         基础功能:
-        1.固定傍点转换成ruby样式,不固定会产生奇怪的代码
-        2.傍点class名称需要确认
-        3.图片处理可能会不正确,图片处理是在正则匹配处理之后,
-        请确认处理后的epub
-        4.ruby处理是删掉了多余的rb代码并且合并多个rt规格化不让其造成
+        1.傍点class名称需要确认
+        2.图片处理可能会不正确,图片处理是在正则匹配之后执行,
+        请确认处理后的epub.日语epub有些会用图片替用文字标点
+        导致脚本出问题,特别是把图片代替文字放在ruby内会直删
+        建议查看epub内的图片对照内容.手动编辑掉这些奇葩玩意
+        3.ruby处理是删掉了多余的rb代码并且合并多个rt规格化不让其造成
         后面ruby兼容正则变换的混乱
         """
         self.show_tooltip_button = Button(self.root, text='说明', command=self.show_help_description, font=("宋体", 12))
@@ -236,7 +237,7 @@ class EpubProcessor:
         self.add_regex_entry(r"<div\s.*?>", "<div>", description="", tooltip="清除div样式")
         self.add_regex_entry(r"<p\s.*?>", "<p>", description="", tooltip="清除p样式")
         self.add_regex_entry(r'<span class="tcy">(.*?)</span>', r'\1', description="", tooltip="清除tcy标签")
-        self.add_regex_entry(r'(<ruby>.*?<rt>.*?)(.*?)(<\/rt><\/ruby>)', r'\1\2\3《\2》', description="", tooltip="ruby兼容增加《》")
+        self.add_regex_entry(r'(<ruby>.*?<rt>)(.*?)(<\/rt><\/ruby>)', r'\1\2\3《\2》', description="", tooltip="ruby兼容增加《》")
 
 
 if __name__ == "__main__":
