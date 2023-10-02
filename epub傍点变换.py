@@ -126,19 +126,22 @@ class EpubProcessor:
                 if self.process_ruby_enabled.get():
                     self.process_ruby(soup)
 
-                if self.modify_html_enabled.get():
-                    content = self.modify_html(str(soup), class_name)
-                    content = self.apply_regex_rules(content, regex_pairs)
-        
-                    if self.process_images_enabled.get():
-                        soup = BeautifulSoup(content, 'html.parser')
-                        self.post_process_images(soup)
-                        content = str(soup)
+                content = str(soup)
+                content = self.apply_regex_rules(content, regex_pairs)
 
-                    item.content = content.encode('utf8')
+                if self.process_images_enabled.get():
+                    soup = BeautifulSoup(content, 'html.parser')
+                    self.post_process_images(soup)
+                    content = str(soup)
+
+                if self.modify_html_enabled.get():
+                    content = self.modify_html(content, class_name)
+
+                item.content = content.encode('utf8')
 
         output_path = os.path.join(os.path.dirname(path), output_filename)
         epub.write_epub(output_path, book)
+
 
     def process_ruby(self, soup):
         ruby_tags = soup.find_all('ruby')
@@ -233,7 +236,7 @@ class EpubProcessor:
         self.add_regex_entry(r"<div\s.*?>", "<div>", description="", tooltip="清除div样式")
         self.add_regex_entry(r"<p\s.*?>", "<p>", description="", tooltip="清除p样式")
         self.add_regex_entry(r'<span class="tcy">(.*?)</span>', r'\1', description="", tooltip="清除tcy标签")
-        self.add_regex_entry(r'(<ruby>[^・<]*?<rt>[^・]*?)([^・<]+)(<\/rt><\/ruby>)', r'\1\2\3《\2》', description="", tooltip="ruby兼容增加《》")
+        self.add_regex_entry(r'(<ruby>.*?<rt>.*?)(.*?)(<\/rt><\/ruby>)', r'\1\2\3《\2》', description="", tooltip="ruby兼容增加《》")
 
 
 if __name__ == "__main__":
