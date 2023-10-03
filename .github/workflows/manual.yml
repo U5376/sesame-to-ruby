@@ -27,7 +27,7 @@ jobs:
         run: |  
           cd nuitka编译upx压缩  # 切换工作目录到你的.py文件和.ico文件所在位置
           python -m nuitka --follow-imports --windows-icon-from-ico=note.ico sesame-to-ruby.py  # 使用Nuitka进行编译
-          upx --best epub傍点变换.exe  # 使用UPX进行压缩
+          upx --best sesame-to-ruby.exe  # 使用UPX进行压缩
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v2
