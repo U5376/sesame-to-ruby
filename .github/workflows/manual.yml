@@ -49,6 +49,6 @@ jobs:
         with:
           tag_name: ${{ steps.tag_version.outputs.new_tag }}
           release_name: 发布版 ${{ steps.tag_version.outputs.new_tag }}
-          asset_path: ./nuitka编译upx压缩/sesame-to-ruby.exe
+          asset_path: ./actions/sesame-to-ruby.exe
           asset_name: sesame-to-ruby.exe
           asset_content_type: application/octet-stream
