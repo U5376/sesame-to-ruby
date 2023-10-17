@@ -21,9 +21,9 @@ jobs:
     - name: 安装依赖
       run: |
         python -m pip install --upgrade pip
+        python -m pip install nuitka
         pip install beautifulsoup4
         pip install ebooklib
-        python -m pip install nuitka
       
     - name: 编译EXE文件
       run: |
