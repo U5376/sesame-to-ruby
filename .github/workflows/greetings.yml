@@ -1,0 +1,39 @@
+name: epub傍点变换nuitka编译exe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+
+    runs-on: windows-latest
+
+    steps:
+
+    - name: 检出代码
+      uses: actions/checkout@v3
+
+    - name: 设置Python环境
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.8
+
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install beautifulsoup4
+        pip install ebooklib
+      
+    - name: 编译EXE文件
+      run: |
+        echo Yes | nuitka --standalone --follow-imports --onefile --windows-icon-from-ico=note.ico --enable-plugin=tk-inter epub傍点变换.py
+      
+    - name: 列出当前目录的文件列表
+      shell: pwsh
+      run: Get-ChildItem -Force
+
+    - name: 上传EXE文件
+      uses: actions/upload-artifact@v3
+      with:
+        name: epub傍点变换-exe
+        path: ./epub傍点变换.exe
