@@ -27,7 +27,7 @@ jobs:
       
     - name: 编译EXE文件
       run: |
-        echo Yes | nuitka --standalone --follow-imports --onefile --windows-icon-from-ico=note.ico --enable-plugin=tk-inter epub傍点变换.py
+        echo Yes | nuitka --standalone --follow-imports --onefile --windows-icon-from-ico=note.ico --enable-plugin=tk-inter sesame-to-ruby.py --verbose
       
     - name: 列出当前目录的文件列表
       shell: pwsh
@@ -36,5 +36,5 @@ jobs:
     - name: 上传EXE文件
       uses: actions/upload-artifact@v3
       with:
-        name: epub傍点变换-exe
-        path: ./epub傍点变换.exe
+        name: sesame-to-ruby.py
+        path: ./sesame-to-ruby.exe
