@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 import ebooklib.epub as epub
 from tkinter import filedialog, messagebox, Entry, Label, Button, END
 from ebooklib import ITEM_DOCUMENT
+from Image import icon_base64 # 引入base值的图标文件
 import warnings
 
 
@@ -50,6 +51,11 @@ class EpubProcessor:
         # 设置默认字体
         #default_font = ("Aria", 12)
         #root.option_add("*Font", default_font)
+
+        # 设置窗口图标 如果没有图标的话本地会报错
+        icon_data = icon_base64  # 图标的Base64数据
+        icon_img = tk.PhotoImage(data=icon_data)
+        root.iconphoto(True, icon_img)
 
         root.title("EPUB傍点转Ruby")
 
