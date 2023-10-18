@@ -27,7 +27,7 @@ jobs:
       
     - name: 编译EXE文件
       run: |
-        echo Yes | nuitka --standalone --follow-imports --onefile --windows-icon-from-ico=note.ico --enable-plugin=tk-inter sesame-to-ruby.py --verbose
+        echo Yes | nuitka --standalone --follow-imports --onefile --windows-icon-from-ico=note.ico --enable-plugin=tk-inter sesame-to-ruby.py
       
     - name: 列出当前目录的文件列表
       shell: pwsh
