@@ -1,14 +1,14 @@
 import os
 import re
+import copy
 import tkinter as tk
 from tkinter import ttk,font
 from bs4 import BeautifulSoup
 import ebooklib.epub as epub
 from tkinter import filedialog, messagebox, Entry, Label, Button, END
 from ebooklib import ITEM_DOCUMENT
-from Image import icon_base64 # 引入base值的图标文件
+from Image import icon_base64
 import warnings
-
 
 class ToolTip(object):
     def __init__(self, widget, text):
@@ -42,7 +42,6 @@ class ToolTip(object):
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
-
 class EpubProcessor:
     def __init__(self, root):
         self.root = root
@@ -51,8 +50,8 @@ class EpubProcessor:
         # 设置默认字体
         #default_font = ("Aria", 12)
         #root.option_add("*Font", default_font)
-
-        # 设置窗口图标 如果没有图标的话本地会报错
+        
+        # 设置窗口图标
         icon_data = icon_base64  # 图标的Base64数据
         icon_img = tk.PhotoImage(data=icon_data)
         root.iconphoto(True, icon_img)
@@ -100,8 +99,7 @@ class EpubProcessor:
         1.傍点class名称需要确认
         2.图片处理可能会不正确,图片处理是在正则匹配之后执行,
         请确认处理后的epub.日语epub有些会用图片替用文字标点
-        导致脚本出问题,特别是把图片代替文字放在ruby内会直删
-        建议查看epub内的图片对照内容.手动编辑掉这些奇葩玩意
+        导致脚本出问题
         3.ruby处理是删掉了多余的rb代码并且合并多个rt规格化不让其造成
         后面ruby兼容正则变换的混乱
         """
@@ -152,23 +150,37 @@ class EpubProcessor:
 
     def process_ruby(self, soup):
         ruby_tags = soup.find_all('ruby')
+
         for ruby_tag in ruby_tags:
+            img_tags = ruby_tag.find_all('img')
+            for img_tag in img_tags:
+                copy_tag = copy.copy(img_tag)   # 复制图片标签
+                ruby_tag.insert_before(copy_tag)  # 将复制的图片标签插入到 ruby 标签之前
+                img_tag.extract()   # 删除原始图片标签
+
+            rb_tags = ruby_tag.find_all('rb')
             rt_tags = ruby_tag.find_all('rt')
+            
+            rb_contents = []
+            for rb_tag in rb_tags:
+                rb_contents.extend(rb_tag.contents)
+                rb_tag.extract()
 
-            original_content = ruby_tag.get_text()
-
-            merged_content = ''.join(rt_tag.string.strip() for rt_tag in rt_tags)
-
+            rt_contents = []
             for rt_tag in rt_tags:
+                rt_contents.extend(rt_tag.contents)
                 rt_tag.extract()
 
-            rt_tag = soup.new_tag('rt')
-            rt_tag.string = merged_content
+            new_rb_tag = soup.new_tag('rb')
+            new_rb_tag.extend(rb_contents)
+
+            new_rt_tag = soup.new_tag('rt')
+            new_rt_tag.extend(rt_contents)
 
             new_ruby_tag = soup.new_tag('ruby')
-            new_ruby_tag.string = original_content
-            new_ruby_tag.append(rt_tag)
-
+            new_ruby_tag.append(new_rb_tag)
+            new_ruby_tag.append(new_rt_tag)
+            
             ruby_tag.replace_with(new_ruby_tag)
 
     def post_process_images(self, soup):
@@ -179,11 +191,12 @@ class EpubProcessor:
                 del img_tag['style']
 
         for p in soup.find_all('p'):
-            img_tag = p.find('img', alt=True)
-            if img_tag:
-                new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
-                new_div.append(img_tag.extract())
-                p.replace_with(new_div)
+            img_tags = p.find_all('img', alt=True)
+            for img_tag in img_tags:
+                if 'gaiji' not in img_tag.get('class', []):
+                    new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
+                    new_div.append(img_tag.extract())
+                    p.insert_before(new_div)
 
         for svg in soup.find_all('svg'):
             img_tag = svg.find('image')
