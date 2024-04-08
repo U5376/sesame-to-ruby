@@ -149,39 +149,32 @@ class EpubProcessor:
 
 
     def process_ruby(self, soup):
-        ruby_tags = soup.find_all('ruby')
-
+        ruby_tags = soup.find_all('ruby')  # 查找所有的 <ruby> 标签
         for ruby_tag in ruby_tags:
-            img_tags = ruby_tag.find_all('img')
+            img_tags = ruby_tag.find_all('img')  # 查找所有的 <img> 标签
             for img_tag in img_tags:
-                copy_tag = copy.copy(img_tag)   # 复制图片标签
+                copy_tag = copy.copy(img_tag)  # 复制图片标签
                 ruby_tag.insert_before(copy_tag)  # 将复制的图片标签插入到 ruby 标签之前
-                img_tag.extract()   # 删除原始图片标签
+                img_tag.extract()  # 删除原始图片标签
 
-            rb_tags = ruby_tag.find_all('rb')
-            rt_tags = ruby_tag.find_all('rt')
-            
-            rb_contents = []
-            for rb_tag in rb_tags:
-                rb_contents.extend(rb_tag.contents)
-                rb_tag.extract()
+            rt_tags = ruby_tag.find_all('rt')  # 查找所有的 <rt> 标签
 
-            rt_contents = []
+            original_content = ruby_tag.get_text()  # 获取原始内容（不包含 <rt> 标签）
+
+            merged_content = ''.join(rt_tag.string.strip() for rt_tag in rt_tags)  # 合并 <rt> 标签内的内容
+
             for rt_tag in rt_tags:
-                rt_contents.extend(rt_tag.contents)
-                rt_tag.extract()
+                rt_tag.extract()  # 删除所有的 <rt> 标签
 
-            new_rb_tag = soup.new_tag('rb')
-            new_rb_tag.extend(rb_contents)
+            rt_tag = soup.new_tag('rt')  # 创建一个新的 <rt> 标签
+            rt_tag.string = merged_content  # 设置新的 <rt> 标签的内容
 
-            new_rt_tag = soup.new_tag('rt')
-            new_rt_tag.extend(rt_contents)
+            new_ruby_tag = soup.new_tag('ruby')  # 创建一个新的 <ruby> 标签
+            new_ruby_tag.string = original_content  # 设置新的 <ruby> 标签的内容
+            new_ruby_tag.append(rt_tag)  # 将新的 <rt> 标签添加到新的 <ruby> 标签中
 
-            new_ruby_tag = soup.new_tag('ruby')
-            new_ruby_tag.append(new_rb_tag)
-            new_ruby_tag.append(new_rt_tag)
-            
-            ruby_tag.replace_with(new_ruby_tag)
+            ruby_tag.replace_with(new_ruby_tag)  # 用新的 <ruby> 标签替换原始的 <ruby> 标签
+            # 用新的<ruby>标签替换原始的<ruby>标签 其中并不包含<rb>标签
 
     def post_process_images(self, soup):
         for div in soup.find_all('div'):
