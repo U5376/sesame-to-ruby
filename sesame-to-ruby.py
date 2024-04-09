@@ -170,7 +170,7 @@ class EpubProcessor:
             rt_tag.string = merged_content  # 设置新的 <rt> 标签的内容
 
             new_ruby_tag = soup.new_tag('ruby')  # 创建一个新的 <ruby> 标签
-            new_ruby_tag.string = original_content  # 设置新的 <ruby> 标签的内容
+            new_ruby_tag.string = original_content.replace('\n', '')  # 设置新的 <ruby> 标签的内容，并删除换行符
             new_ruby_tag.append(rt_tag)  # 将新的 <rt> 标签添加到新的 <ruby> 标签中
 
             ruby_tag.replace_with(new_ruby_tag)  # 用新的 <ruby> 标签替换原始的 <ruby> 标签
