@@ -99,7 +99,8 @@ class EpubProcessor:
         1.傍点class名称需要确认
         2.图片处理可能会不正确,图片处理是在正则匹配之后执行,
         请确认处理后的epub.日语epub有些会用图片替用文字标点
-        导致脚本出问题
+        导致脚本出问题,特别是把图片代替文字放在ruby内会直删
+        建议查看epub内的图片对照内容.手动编辑掉这些奇葩玩意
         3.ruby处理是删掉了多余的rb代码并且合并多个rt规格化不让其造成
         后面ruby兼容正则变换的混乱
         """
@@ -143,6 +144,18 @@ class EpubProcessor:
                     content = self.modify_html(content, class_name)
 
                 item.content = content.encode('utf8')
+                
+        for item in book.get_items():
+            if item.get_name() == "content.opf":
+                content = item.get_content().decode('utf8')
+
+                # 删除<spine>标签的page-progression-direction属性
+                content = re.sub(r'(<spine .*)page-progression-direction="rtl"(.*>)', r'\1\2', content)
+            
+                # 删除<itemref idref="nav.xhtml" linear="no"/>行
+                content = re.sub(r'<itemref idref="nav.xhtml" linear="no"/>', '', content)
+
+                item.content = content.encode('utf8')
 
         output_path = os.path.join(os.path.dirname(path), output_filename)
         epub.write_epub(output_path, book)
@@ -161,7 +174,7 @@ class EpubProcessor:
 
             original_content = ruby_tag.get_text()  # 获取原始内容（不包含 <rt> 标签）
 
-            merged_content = ''.join(rt_tag.string.strip() for rt_tag in rt_tags)  # 合并 <rt> 标签内的内容
+            merged_content = ''.join(rt_tag.string.strip() if rt_tag.string else '' for rt_tag in rt_tags)  # 合并 <rt> 标签内的内容
 
             for rt_tag in rt_tags:
                 rt_tag.extract()  # 删除所有的 <rt> 标签
@@ -204,12 +217,19 @@ class EpubProcessor:
 
         for span in soup.find_all('span', class_=class_name):
             ruby = soup.new_tag('ruby')
-            for char in span.string:
-                ruby.append(soup.new_string(char))
-                rt_tag = soup.new_tag('rt')
-                rt_tag.append(soup.new_string("・"))
-                ruby.append(rt_tag)
-            span.replace_with(ruby)
+            
+            # 确保 span.string 不为 None
+            if span.string:
+                for char in span.string:
+                    ruby.append(soup.new_string(char))  # 添加字符
+                    rt_tag = soup.new_tag('rt')
+                    rt_tag.append(soup.new_string("・"))  # 添加 rt 标签
+                    ruby.append(rt_tag)
+            else:
+                # 如果 span.string 为 None, 这里可以添加额外处理逻辑（例如跳过或使用默认值）
+                ruby.append(soup.new_string(''))  # 如果为空，直接添加一个空字符串
+            
+            span.replace_with(ruby)  # 替换原来的 span 标签
 
         return str(soup)
 
