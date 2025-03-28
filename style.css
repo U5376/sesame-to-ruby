@@ -1,0 +1,32 @@
+﻿/*注释文字跟注释内容设置*/
+.duokan-footnote{font-size:1.2em;}
+notetag{font-size:1.2em;}
+img.zhangyue-footnote{width:8%;}
+
+/*插图设置*/
+/*图片并列显示 td单元格 tr表格的一行 taody把td tr视为一个结构 table表格(整个表格的内容)*/
+/*背景颜色设置<body bgcolor="#fff">*/
+/*彩插页相关*/
+.caicha {
+    width: 100%;
+    max-width: 25em;
+    height: auto;
+    padding: 0;
+    margin: 0;
+}
+.illus{
+    text-indent: 0em;
+    text-align: center;
+}
+.illus img{
+  width: 100%;
+}
+
+.illu div {
+    margin: 0.4em 0em;
+    text-indent: 0;
+    duokan-text-indent: 0;
+    line-height: 1.2em;
+}
+hr {border-color:black;}
+ruby rt {font-size: 0.7em;}

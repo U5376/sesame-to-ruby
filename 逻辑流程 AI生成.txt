@@ -1,0 +1,57 @@
+﻿文件列表
+主程序sesame-to-ruby.py
+epub_ncx_generator.py #生成toc.ncx 转epub2.0 更新opf信息 移除nav.xhtml
+
+
+1. EpubProcessor.__init__（初始化界面）
+   - 创建GUI窗口，加载图标
+   - 初始化默认正则规则（add_default_regex_rules）
+
+2. EpubProcessor.open_file_dialog（文件选择）
+   - 用户选择输入/输出EPUB文件
+
+3. EpubProcessor.process_epub（解压处理）
+   - 解压EPUB到临时目录（zipfile.ZipFile.extractall）
+   - 解析container.xml获取OPF路径（_parse_toc）
+
+4. EpubProcessor.process_opf_and_styles（OPF核心处理）
+   - 删除page-progression-direction属性（BeautifulSoup修改spine标签）
+   - 清理CSS引用（删除item[media-type="text/css"]）
+   - 添加自定义样式表（创建<link>标签到XHTML文件头）
+
+5. EpubNCXGenerator.generate_ncx（生成NCX | _create_ncx_content）
+   - 基于NAV构建层级目录（_parse_nav递归解析列表）
+   - 生成toc.ncx文件并写入层级结构
+
+6. EpubNCXGenerator.convert_to_epub2（版本转换）
+   - 修改package声明为version="2.0"（正则替换）
+   - 删除epub3.0的prefix属性（re.sub清理）
+   - 移除nav.xhtml文件（os.remove）
+
+7. 文件处理阶段（循环处理每个XHTML文件）：
+   a. EpubProcessor.process_ruby（Ruby规范化 | def process_ruby）
+      - 提取<img>标签到Ruby外部（copy.copy处理）
+      - 合并多个<rt>内容（merged_content生成）
+   
+   b. EpubProcessor.apply_regex_rules（正则预处理）
+      - 执行预设规则替换（如清理body/div/p标签样式）
+   
+   c. EpubProcessor.modify_html（傍点转换）
+      - 转换class指定的<span>为<ruby>（创建rt标签并添加"・"）
+   
+   d. EpubProcessor.post_process_images（图片处理）
+      - 包裹<img>到<div class="illus">（创建新div标签）
+      - 转换SVG为<img>（替换svg标签）
+
+8. EpubProcessor.merge_xhtml_files（章节合并）
+   - 按目录结构合并文件（解析spine顺序）
+   - 添加段落间距<br>（插入<p><br/></p>）
+   - 清理已合并文件（os.remove）
+
+9. EpubProcessor._update_opf_reference（OPF更新）
+   - 移除已合并文件的manifest项（BeautifulSoup删除item）
+   - 更新spine引用顺序
+
+10. 最终打包
+    - 重新压缩为EPUB（zipfile.ZipFile写入）
+    - 保留META-INF/container.xml结构
