@@ -14,21 +14,19 @@ class EpubNCXGenerator:
             opf_dir = os.path.dirname(opf_path)
             ncx_path = os.path.join(opf_dir, 'toc.ncx')
             nav_path = EpubNCXGenerator._find_nav_path(opf_path)
-            # 检查ncx nav是否存在
             if os.path.exists(ncx_path):
                 return True, "toc.ncx已存在，跳过生成"
             if not nav_path:
                 return False, "未找到有效的NAV文件"
-
             # 解析NAV文件获取目录结构
             toc_entries = EpubNCXGenerator._parse_nav(nav_path, opf_dir)
-            
             # 生成NCX内容
             ncx_path = os.path.join(opf_dir, 'toc.ncx')
             uid = EpubNCXGenerator._get_uid_from_opf(opf_path)
+            book_title = EpubNCXGenerator._get_book_title_from_opf(opf_path)
             
             with open(ncx_path, 'w', encoding='utf-8') as f:
-                f.write(EpubNCXGenerator._create_ncx_content(uid, toc_entries))
+                f.write(EpubNCXGenerator._create_ncx_content(uid, toc_entries, book_title))
 
             # 更新OPF引用
             EpubNCXGenerator._update_opf_reference(opf_path)
@@ -36,6 +34,14 @@ class EpubNCXGenerator:
             return True, "NCX生成成功（基于NAV）"
         except Exception as e:
             return False, f"NCX生成失败: {str(e)}"
+
+    @staticmethod
+    def _get_book_title_from_opf(opf_path):
+        """从OPF文件解析dc:title作为书籍标题"""
+        with open(opf_path, 'r', encoding='utf-8') as f:
+            opf_soup = BeautifulSoup(f.read(), 'xml')
+        title_tag = opf_soup.find('dc:title')
+        return title_tag.get_text(strip=True) if title_tag else "Unknown Title"
 
     @staticmethod
     def convert_to_epub2(opf_path):
@@ -125,36 +131,48 @@ class EpubNCXGenerator:
         return entries
 
     @staticmethod
-    def _create_ncx_content(uid, toc_entries):
+    def _create_ncx_content(uid, toc_entries, book_title):
         nav_points = []
         play_order = 1
-
+        def calculate_max_depth(entries, current_depth=1):
+            max_depth = current_depth
+            for entry in entries:
+                if entry['children']:
+                    child_depth = calculate_max_depth(entry['children'], current_depth + 1)
+                    if child_depth > max_depth:
+                        max_depth = child_depth
+            return max_depth
         def build_nav_points(entries, parent_id=None):
             nonlocal play_order
             points = []
             for entry in entries:
                 point_id = f"navPoint-{play_order}"
                 nav_point = f'''
-                <navPoint id="{point_id}" playOrder="{play_order}"{' parent="' + parent_id + '"' if parent_id else ''}>
+                <navPoint id="{point_id}" playOrder="{play_order}">
                     <navLabel><text>{entry['title']}</text></navLabel>
                     <content src="{entry['href']}"/>'''
                 play_order += 1
                 if entry['children']:
                     child_points = build_nav_points(entry['children'], point_id)
-                    nav_point += f'\n{"".join(child_points)}\n            </navPoint>'
+                    nav_point += f'\n{"".join(child_points)}\n</navPoint>'
                 else:
-                    nav_point += '\n            </navPoint>'
+                    nav_point += '\n</navPoint>'
                 points.append(nav_point)
             return points
-
         nav_points = build_nav_points(toc_entries)
+        max_depth = calculate_max_depth(toc_entries) if toc_entries else 1
         return f'''<?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
     <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
     <head>
-    <meta name="dtb:uid" content="{uid}"/>
-    <meta name="dtb:depth" content="{max(e['depth'] for e in toc_entries) if toc_entries else 1}"/>
+    <meta content="{uid}" name="dtb:uid"/>
+    <meta content="{max_depth}" name="dtb:depth"/>
+    <meta content="0" name="dtb:totalPageCount"/>
+    <meta content="0" name="dtb:maxPageNumber"/>
     </head>
+    <docTitle>
+     <text>{book_title}</text>
+    </docTitle>
     <navMap>
     {"".join(nav_points)}
     </navMap>
