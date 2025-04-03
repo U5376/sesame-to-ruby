@@ -244,10 +244,10 @@ class EpubProcessor:
                 os.remove(css_file)
 
             # 5. 添加自定义的 style.css 文件
+            css_dir = os.path.join(temp_dir, 'OEBPS', 'css')
+            os.makedirs(css_dir, exist_ok=True)
             custom_css_path = os.path.join(os.path.dirname(__file__), 'style.css')
             if os.path.exists(custom_css_path):
-                css_dir = os.path.join(temp_dir, 'OEBPS', 'css')
-                os.makedirs(css_dir, exist_ok=True)
                 shutil.copy(custom_css_path, os.path.join(css_dir, 'style.css'))
             else:
                 messagebox.showwarning("警告", "自定义样式表文件 style.css 不存在")
@@ -263,10 +263,6 @@ class EpubProcessor:
                         # 清理所有样式相关标签
                         for tag in soup.select('style, link[rel="stylesheet"]'):
                             tag.decompose()
-                        # 清理内联样式
-                        for tag in soup.find_all(True):
-                            if 'style' in tag.attrs:
-                                del tag.attrs['style']
                         # 添加新样式表链接
                         if head_tag := soup.find('head'):
                             link_tag = soup.new_tag('link', rel='stylesheet', type='text/css', href='../css/style.css')
@@ -285,9 +281,12 @@ class EpubProcessor:
                 if not success:
                     messagebox.showwarning("版本转换警告", msg)
                 # 删除nav（如果存在）
-                nav_path = os.path.join(os.path.dirname(opf_path), 'nav.xhtml')
-                if os.path.exists(nav_path):
-                    os.remove(nav_path)
+                nav_item = opf_soup.find('item', properties='nav')
+                if nav_item:
+                    nav_path = os.path.join(os.path.dirname(opf_path), nav_item['href'])
+                    if os.path.exists(nav_path):
+                        os.remove(nav_path)
+            logger.info("OPF文件和样式处理完成")
 
     def merge_xhtml_files(self, temp_dir, opf_path):
         # 解析OPF文件
@@ -533,11 +532,10 @@ class EpubProcessor:
                         decoded_href = unquote(href)
                         normalized_href = os.path.normpath(decoded_href).replace('\\', '/')
                         file_name = os.path.basename(normalized_href)
-                        ext = os.path.splitext(file_name)[1][1:].lower()  # 去掉点号
+                        ext = os.path.splitext(file_name)[1][1:].lower()
                         # 检查是否为图片项
                         if ext not in media_map:
                             continue
-                        # 更新逻辑
                         target_ext = output_format
                         if file_name in image_mapping or ext == target_ext:
                             # 更新href
@@ -612,6 +610,17 @@ class EpubProcessor:
                 new_img = soup.new_tag('img', src=img_tag['xlink:href'], alt='', attrs={'class': 'fit'})
                 new_div.append(new_img)
                 svg.replace_with(new_div)
+
+        for switch in soup.find_all('ops:switch'):
+            svg = switch.find('svg')
+            if svg:
+                img_tag = svg.find('image')
+                if img_tag and img_tag.get('xlink:href', '').startswith('../image/'):
+                    new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
+                    new_img = soup.new_tag('img', src=img_tag['xlink:href'], alt='', attrs={'class': 'fit'})
+                    new_div.append(new_img)
+                    switch.replace_with(new_div)
+        logger.info("图片标签规格化完成")
 
     def modify_html(self, html, class_name):
         soup = BeautifulSoup(html, 'html.parser')
