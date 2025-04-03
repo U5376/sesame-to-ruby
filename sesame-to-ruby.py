@@ -220,56 +220,66 @@ class EpubProcessor:
             for item in opf_soup.find_all('item', attrs={'media-type': 'text/css'}):
                 item.decompose()
 
-            # 3. 添加自定义样式表的引用到 OPF 的 manifest
+            # 3. 动态生成CSS路径 添加自定义样式表到OPF清单
+            opf_dir = os.path.dirname(opf_path)
+            css_target_dir = os.path.join(opf_dir, 'css')
+            os.makedirs(css_target_dir, exist_ok=True)
             manifest_tag = opf_soup.find('manifest')
             if manifest_tag:
+                css_rel_path = os.path.relpath(
+                    os.path.join(css_target_dir, 'style.css'),
+                    opf_dir
+                ).replace('\\', '/')
                 new_item = opf_soup.new_tag('item', attrs={
-                    'href': 'css/style.css',
+                    'href': css_rel_path,
                     'id': 'style-css',
                     'media-type': 'text/css'
                 })
                 manifest_tag.append(new_item)
-
             # 写回 OPF 文件
             with open(opf_path, 'w', encoding='utf-8') as f:
                 f.write(str(opf_soup))
 
-            # 4. 删除自带的 CSS 文件
-            css_files = []
-            for root, dirs, files in os.walk(temp_dir):
+            # 4. 删除所有自带CSS文件
+            for root, _, files in os.walk(temp_dir):
                 for file in files:
                     if file.endswith('.css'):
-                        css_files.append(os.path.join(root, file))
-            for css_file in css_files:
-                os.remove(css_file)
+                        os.remove(os.path.join(root, file))
 
             # 5. 添加自定义的 style.css 文件
-            css_dir = os.path.join(temp_dir, 'OEBPS', 'css')
-            os.makedirs(css_dir, exist_ok=True)
-            custom_css_path = os.path.join(os.path.dirname(__file__), 'style.css')
-            if os.path.exists(custom_css_path):
-                shutil.copy(custom_css_path, os.path.join(css_dir, 'style.css'))
+            custom_css_src = os.path.join(os.path.dirname(__file__), 'style.css')
+            if os.path.exists(custom_css_src):
+                shutil.copy(custom_css_src, os.path.join(css_target_dir, 'style.css'))
             else:
                 messagebox.showwarning("警告", "自定义样式表文件 style.css 不存在")
 
             # 6. 在所有 XHTML 文件中添加样式表链接并清理样式
-            for root, dirs, files in os.walk(temp_dir):
+            for root, _, files in os.walk(temp_dir):
                 for file in files:
-                    if file.endswith('.xhtml') or file.endswith('.html'):
-                        file_path = os.path.join(root, file)
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        soup = BeautifulSoup(content, 'html.parser')
-                        # 清理所有样式相关标签
+                    if not file.lower().endswith(('.xhtml', '.html')):
+                        continue
+                    file_path = os.path.join(root, file)
+                    with open(file_path, 'r+', encoding='utf-8') as f:
+                        soup = BeautifulSoup(f.read(), 'html.parser')
+                        # 清理旧样式标签
                         for tag in soup.select('style, link[rel="stylesheet"]'):
                             tag.decompose()
-                        # 添加新样式表链接
+                        # 动态计算相对路径
+                        css_rel_xhtml = os.path.relpath(
+                            os.path.join(css_target_dir, 'style.css'),
+                            os.path.dirname(file_path)
+                        ).replace('\\', '/')
+                        # 添加新链接
                         if head_tag := soup.find('head'):
-                            link_tag = soup.new_tag('link', rel='stylesheet', type='text/css', href='../css/style.css')
+                            link_tag = soup.new_tag('link',
+                                rel='stylesheet',
+                                type='text/css',
+                                href=css_rel_xhtml)
                             head_tag.append(link_tag)
-                        with open(file_path, 'w', encoding='utf-8') as f:
-                            f.write(str(soup))
-
+                        # 写回文件
+                        f.seek(0)
+                        f.write(str(soup))
+                        f.truncate()
             if self.generate_ncx_enabled.get():
                 # 生成ncx 更新opf
                 success, msg = EpubNCXGenerator.generate_ncx(opf_path)
@@ -286,7 +296,6 @@ class EpubProcessor:
                     nav_path = os.path.join(os.path.dirname(opf_path), nav_item['href'])
                     if os.path.exists(nav_path):
                         os.remove(nav_path)
-            logger.info("OPF文件和样式处理完成")
 
     def merge_xhtml_files(self, temp_dir, opf_path):
         # 解析OPF文件
