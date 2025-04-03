@@ -3,6 +3,7 @@ import re
 import copy
 import zipfile
 import tempfile
+import subprocess
 import xml.etree.ElementTree as ET
 import tkinter as tk
 from bs4 import BeautifulSoup
@@ -11,6 +12,7 @@ from tkinter import ttk, filedialog, messagebox, Entry, Label, Button, END
 from Image import icon_base64
 import warnings
 import shutil
+from urllib.parse import unquote
 
 class ToolTip:
     def __init__(self, widget, text):
@@ -96,6 +98,14 @@ class EpubProcessor:
             check_button = tk.Checkbutton(root, text=text, variable=variable, onvalue=True, offvalue=False, font=FONT)
             check_button.pack(anchor='w')
 
+        # 图片转换
+        self.convert_images_var = tk.BooleanVar(value=True)
+        self.image_params_var = tk.StringVar(value="-f webp -q 85 -H 300 -s 1.4")
+        f = tk.Frame(root)
+        tk.Checkbutton(f, text="转换图片", variable=self.convert_images_var, font=FONT).pack(side=tk.LEFT)
+        tk.Entry(f, textvariable=self.image_params_var, width=30, font=FONT).pack(side=tk.LEFT)
+        f.pack(fill=tk.X, anchor='w')
+
         self.add_default_regex_rules()
 
     def initialize_tooltip_content(self):
@@ -148,7 +158,9 @@ class EpubProcessor:
                     raise ValueError("未找到 .opf 文件路径")
 
                 opf_full_path = os.path.join(temp_dir, opf_path)
-
+                # 新增图片转换（在删除style之前）
+                if self.convert_epub_version_enabled.get():
+                    self.convert_epub_images(temp_dir)
                 # 如果启用了删除自带样式并添加自定义样式表功能，则处理 OPF 和样式
                 if self.delete_style_enabled.get():
                     self.process_opf_and_styles(opf_full_path, temp_dir)
@@ -248,22 +260,17 @@ class EpubProcessor:
                         with open(file_path, 'r', encoding='utf-8') as f:
                             content = f.read()
                         soup = BeautifulSoup(content, 'html.parser')
-
-                        # 清理原有的 <style> 标签
-                        for style_tag in soup.find_all('style'):
-                            style_tag.extract()
-
+                        # 清理所有样式相关标签
+                        for tag in soup.select('style, link[rel="stylesheet"]'):
+                            tag.decompose()
                         # 清理内联样式
                         for tag in soup.find_all(True):
                             if 'style' in tag.attrs:
                                 del tag.attrs['style']
-
-                        # 添加对 style.css 的链接
-                        head_tag = soup.find('head')
-                        if head_tag:
+                        # 添加新样式表链接
+                        if head_tag := soup.find('head'):
                             link_tag = soup.new_tag('link', rel='stylesheet', type='text/css', href='../css/style.css')
                             head_tag.append(link_tag)
-
                         with open(file_path, 'w', encoding='utf-8') as f:
                             f.write(str(soup))
 
@@ -286,13 +293,11 @@ class EpubProcessor:
         # 解析OPF文件
         with open(opf_path, 'r', encoding='utf-8') as f:
             opf_soup = BeautifulSoup(f.read(), 'xml')
-        
-        # 获取spine顺序
         spine = opf_soup.spine
         if not spine:
             raise ValueError("OPF文件中缺少spine定义")
 
-        # 获取所有spine文件路径（修复路径拼接）
+        # 获取所有spine文件路径
         spine_files = []
         opf_dir = os.path.dirname(opf_path)
         for itemref in spine.find_all('itemref'):
@@ -302,14 +307,12 @@ class EpubProcessor:
                 # 规范化路径：处理相对路径和URL编码
                 normalized_href = os.path.normpath(os.path.join(opf_dir, href))
                 spine_files.append(normalized_href)
-
         # 解析目录结构
         toc_entries = self._parse_toc(opf_soup, opf_path)
         if not toc_entries:
             print("警告：未找到有效目录，跳过合并")
             return
 
-        # 按目录结构合并文件（添加调试日志）
         print(f"待合并的Spine文件列表: {spine_files}")
         print(f"解析到的目录条目: {toc_entries}")
 
@@ -349,12 +352,14 @@ class EpubProcessor:
                 
                 # 转移<body>内容
                 if main_soup.body and merge_soup.body:
-                    # 添加两行 `<p><br/></p>` 并换行
-                    for _ in range(2):  # 添加两次
-                        p_tag = main_soup.new_tag('p')
-                        p_tag.append(main_soup.new_tag('br'))
-                        main_soup.body.append(p_tag)
-                        main_soup.body.append('\n')
+                    # 添加双br标签夹hr标签隔开
+                    def add_separator(soup, parent):
+                        for tag in ['p', 'hr', 'p']:
+                            element = soup.new_tag(tag)
+                            if tag == 'p':
+                                element.append(soup.new_tag('br'))
+                            parent.extend([element, '\n'])
+                    add_separator(main_soup, main_soup.body)
                     # 复制合并文件的内容
                     for child in merge_soup.body.children:
                         if child.name == 'script':  # 跳过脚本标签
@@ -407,6 +412,164 @@ class EpubProcessor:
                     return [{'href': a['href'].split('#')[0]} for a in nav_tag.find_all('a', href=True)]
         return []
 
+    def convert_epub_images(self, temp_dir):
+        """集成图片转换、清理旧文件、更新引用"""
+        if not self.convert_images_var.get():
+            return
+        try:
+            # ===== 1. 配置初始化 =====
+            print("\n" + "="*40)
+            print("开始处理图片转换流程")
+            media_map = {'webp':'image/webp', 'png':'image/png', 
+                        'jpg':'image/jpeg', 'jpeg':'image/jpeg'}
+            # 从参数解析输出格式
+            output_format = 'webp'
+            params = self.image_params_var.get().split()
+            if '-f' in params:
+                try:
+                    output_format = params[params.index('-f') + 1].lower()
+                except (IndexError, ValueError):
+                    print("参数解析失败，使用默认格式webp")
+            # ===== 2. 收集原始图片文件 =====
+            original_images = []
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        full_path = os.path.join(root, file)
+                        if os.path.exists(full_path):  # 二次验证文件存在
+                            original_images.append(full_path)
+                            print(f"[扫描] 发现图片文件: {os.path.relpath(full_path, temp_dir)}")
+            if not original_images:
+                print("未找到需要转换的图片，跳过此流程")
+                return
+            # ===== 3. 生成文件名映射 =====
+            image_mapping = {}
+            for old_path in original_images:
+                old_name = os.path.basename(old_path)
+                new_name = f"{os.path.splitext(old_name)[0]}.{output_format}"
+                image_mapping[old_name] = new_name
+                print(f"[映射] {old_name} → {new_name}")
+            # ===== 4. 执行图片转换 =====
+            converter_path = os.path.join(os.path.dirname(__file__), "image_converter.exe")
+            if not os.path.exists(converter_path):
+                raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
+            # 生成绝对路径列表文件
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as list_file:
+                list_file.write('\n'.join(original_images))
+                list_path = list_file.name
+                print(f"[转换] 生成临时列表文件: {list_path}")
+            try:
+                # 执行转换命令
+                cmd = [converter_path, "-i", f"@{list_path}", *params]
+                print("[转换] 执行命令:", ' '.join(cmd))
+                result = subprocess.run(cmd,cwd=temp_dir,capture_output=True,text=True,check=True)
+                print("[转换] 输出日志:\n" + result.stdout)
+            except subprocess.CalledProcessError as e:
+                print("[错误] 转换失败:\n" + e.stderr)
+                raise
+            finally:
+                os.remove(list_path)
+                print(f"[清理] 已删除临时文件: {list_path}")
+            # ===== 5. 清理旧文件 =====
+            deleted_files = 0
+            for old_path in original_images:
+                dir_path = os.path.dirname(old_path)
+                old_name = os.path.basename(old_path)
+                new_path = os.path.join(dir_path, image_mapping[old_name])
+                if os.path.exists(new_path):
+                    try:
+                        os.remove(old_path)
+                        deleted_files += 1
+                        print(f"[清理] 已删除: {os.path.relpath(old_path, temp_dir)}")
+                    except Exception as e:
+                        print(f"[警告] 删除失败 {old_path}: {str(e)}")
+                else:
+                    print(f"[错误] 新文件未生成: {os.path.relpath(new_path, temp_dir)}")
+            print(f"[状态] 共清理 {deleted_files}/{len(original_images)} 个旧文件")
+            # ===== 6. 更新内容文件 =====
+            updated_files = 0
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if not file.lower().endswith(('.xhtml', '.html', '.opf')):
+                        continue
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'r+', encoding='utf-8') as f:
+                            content = f.read()
+                            original_content = content
+                            for old, new in image_mapping.items():
+                                content = content.replace(old, new)
+                            if content != original_content:
+                                f.seek(0)
+                                f.write(content)
+                                f.truncate()
+                                updated_files += 1
+                                print(f"[更新] 已修改: {os.path.relpath(file_path, temp_dir)}")
+                    except UnicodeDecodeError:
+                        print(f"[警告] 跳过二进制文件: {file}")
+                    except Exception as e:
+                        print(f"[错误] 处理文件失败 {file}: {str(e)}")
+            print(f"[状态] 共更新 {updated_files} 个内容文件")
+            # ===== 7. 强制更新OPF媒体类型 =====
+            print("\n" + "="*40)
+            print("开始更新OPF文件")
+            try:
+                # 定位OPF文件
+                container_path = os.path.join(temp_dir, 'META-INF', 'container.xml')
+                with open(container_path, 'r', encoding='utf-8') as f:
+                    soup = BeautifulSoup(f.read(), 'xml')
+                    opf_rel_path = soup.find('rootfile')['full-path']
+                opf_path = os.path.normpath(os.path.join(temp_dir, opf_rel_path))
+                print(f"[OPF] 定位到主文档: {os.path.relpath(opf_path, temp_dir)}")
+                # 解析并修改OPF
+                with open(opf_path, 'r+', encoding='utf-8') as f:
+                    soup = BeautifulSoup(f.read(), 'xml')
+                    modified = False
+                    for item in soup.find_all('item'):
+                        href = item.get('href', '')
+                        if not href:
+                            continue
+                        # 规范化路径处理
+                        decoded_href = unquote(href)
+                        normalized_href = os.path.normpath(decoded_href).replace('\\', '/')
+                        file_name = os.path.basename(normalized_href)
+                        ext = os.path.splitext(file_name)[1][1:].lower()  # 去掉点号
+                        # 检查是否为图片项
+                        if ext not in media_map:
+                            continue
+                        # 更新逻辑
+                        target_ext = output_format
+                        if file_name in image_mapping or ext == target_ext:
+                            # 更新href
+                            if file_name in image_mapping:
+                                new_name = image_mapping[file_name]
+                                item['href'] = href.replace(file_name, new_name)
+                                print(f"[OPF] 更新路径: {file_name} → {new_name}")
+                            # 强制更新media-type
+                            new_type = media_map[target_ext]
+                            if item.get('media-type') != new_type:
+                                print(f"[OPF] 更新类型: {item.get('media-type')} → {new_type}")
+                                item['media-type'] = new_type
+                                modified = True
+                    if modified:
+                        f.seek(0)
+                        f.write(str(soup))
+                        f.truncate()
+                        print("[OPF] 文件更新成功")
+                    else:
+                        print("[OPF] 无需修改")
+            except Exception as e:
+                print(f"[严重错误] OPF处理失败: {str(e)}")
+                raise
+        except Exception as e:
+            print("\n" + "!"*40)
+            print("流程异常终止:", str(e))
+            import traceback
+            traceback.print_exc()
+        finally:
+            print("\n" + "="*40)
+            print("图片处理流程结束")
+
     def process_ruby(self, soup):
         ruby_tags = soup.find_all('ruby')  # 查找所有的 <ruby> 标签
         for ruby_tag in ruby_tags:
@@ -415,21 +578,16 @@ class EpubProcessor:
                 copy_tag = copy.copy(img_tag)  # 复制图片标签
                 ruby_tag.insert_before(copy_tag)  # 将复制的图片标签插入到 ruby 标签之前
                 img_tag.extract()  # 删除原始图片标签
-
             rt_tags = ruby_tag.find_all('rt')  # 查找所有的 <rt> 标签
             original_content = ruby_tag.get_text()  # 获取原始内容（不包含 <rt> 标签）
             merged_content = ''.join(rt_tag.string.strip() if rt_tag.string else '' for rt_tag in rt_tags)  # 合并 <rt> 标签内的内容
-
             for rt_tag in rt_tags:
                 rt_tag.extract()  # 删除所有的 <rt> 标签
-
             rt_tag = soup.new_tag('rt')  # 创建一个新的 <rt> 标签
             rt_tag.string = merged_content  # 设置新的 <rt> 标签的内容
-
             new_ruby_tag = soup.new_tag('ruby')  # 创建一个新的 <ruby> 标签
             new_ruby_tag.string = original_content.replace('\n', '')  # 设置新的 <ruby> 标签的内容，并删除换行符
             new_ruby_tag.append(rt_tag)  # 将新的 <rt> 标签添加到新的 <ruby> 标签中
-
             ruby_tag.replace_with(new_ruby_tag)  # 用新的 <ruby> 标签替换原始的 <ruby> 标签
 
     def post_process_images(self, soup):
@@ -478,23 +636,18 @@ class EpubProcessor:
     def add_regex_entry(self, regex="", replace="", description="", tooltip=None):
         frame = tk.Frame(self.root)
         frame.pack()
-
         regex_entry = Entry(frame)
         regex_entry.insert(END, regex)
         replace_entry = Entry(frame)
         replace_entry.insert(END, replace)
         delete_button = Button(frame, text="删除", command=lambda f=frame: self.delete_regex_entry(f), font=("宋体", 12))
-
         Label(frame, text=f"", font=("宋体", 12)).pack(side=tk.LEFT)
         regex_entry.pack(side=tk.LEFT)
         Label(frame, text="", font=("宋体", 12)).pack(side=tk.LEFT)
         replace_entry.pack(side=tk.LEFT)
-
         if tooltip is not None:
             ToolTip(regex_entry, text=tooltip)
-
         delete_button.pack(side=tk.LEFT)
-
         self.regex_entries.append((regex_entry, replace_entry, frame))
 
     def delete_regex_entry(self, frame):
@@ -508,7 +661,6 @@ class EpubProcessor:
         self.add_regex_entry(r"<p>[ 　\t]", "<p>", description="", tooltip="清除P标签行开头 半角空格、全角空格或制表符")
         self.add_regex_entry(r'<span class="tcy">(.*?)</span>', r'\1', description="", tooltip="清除tcy标签")
         self.add_regex_entry(r'(<ruby>.*?<rt>)([^・].*?)(<\/rt><\/ruby>)', r'\1\2\3《\2》', description="", tooltip="ruby兼容增加《》")
-
 
 if __name__ == "__main__":
     root = tk.Tk()

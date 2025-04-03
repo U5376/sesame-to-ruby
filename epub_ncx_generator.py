@@ -69,21 +69,16 @@ class EpubNCXGenerator:
         """智能查找导航文件路径"""
         with open(opf_path, 'r', encoding='utf-8') as f:
             opf_soup = BeautifulSoup(f.read(), 'xml')
-        
         # 查找EPUB3导航文件
         nav_item = opf_soup.find('item', {'properties': 'nav'})
-        
         # 查找EPUB2 NCX文件
         if not nav_item:
             nav_item = opf_soup.find('item', {'media-type': 'application/x-dtbncx+xml'})
-        
         if not nav_item:
             return None
-        
         opf_dir = os.path.dirname(opf_path)
         nav_href = nav_item.get('href', '')
         nav_path = os.path.normpath(os.path.join(opf_dir, nav_href))
-        
         # 验证文件存在性
         if not os.path.exists(nav_path):
             print(f"警告：导航文件不存在 {nav_path}")
@@ -195,7 +190,7 @@ class EpubNCXGenerator:
         for item in opf_soup.find_all('item', {'media-type': 'application/x-dtbncx+xml'}):
             item.decompose()
         
-        # 添加新NCX引用（关键修正）
+        # 添加新NCX引用
         manifest = opf_soup.find('manifest')
         new_item = opf_soup.new_tag(
             'item',
