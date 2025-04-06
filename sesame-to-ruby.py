@@ -13,6 +13,7 @@ from tkinter import ttk, filedialog, messagebox, Entry, Label, Button, END
 from Image import icon_base64
 import warnings
 import shutil
+import lxml.etree
 from urllib.parse import unquote
 from loguru import logger
 
