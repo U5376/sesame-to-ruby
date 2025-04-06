@@ -409,7 +409,7 @@ class EpubProcessor:
                 image_mapping[old_name] = new_name
                 logger.debug(f"[映射] {old_name} → {new_name}")
             # ===== 4. 执行图片转换 =====
-            converter_path = os.path.join(os.path.dirname(__file__), "image_converter.exe")
+            converter_path = os.path.join(os.path.dirname(sys.executable), "image_converter.exe")
             if not os.path.exists(converter_path):
                 raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
             # 生成绝对路径列表文件
