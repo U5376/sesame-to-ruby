@@ -40,10 +40,6 @@ class EpubProcessor:
         open_button = Button(root, text='选择epub文件', command=self.open_file_dialog, font=FONT)
         open_button.pack()
 
-
-        # 添加说明按钮
-        self.initialize_tooltip_content()
-
         flags = ["modify_html_enabled",
             "process_ruby_enabled",
             "process_images_enabled",
