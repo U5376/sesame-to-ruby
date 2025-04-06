@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import copy
 import zipfile
 import tempfile
@@ -13,6 +14,7 @@ from tkinter import ttk, filedialog, messagebox, Entry, Label, Button, END
 from Image import icon_base64
 import warnings
 import shutil
+import lxml.etree
 from urllib.parse import unquote
 from loguru import logger
 
@@ -199,11 +201,12 @@ class EpubProcessor:
                         os.remove(os.path.join(root, file))
 
             # 5. 添加自定义的 style.css 文件
-            custom_css_src = os.path.join(os.path.dirname(__file__), 'style.css')
+            custom_css_src = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), 'style.css')
             if os.path.exists(custom_css_src):
                 shutil.copy(custom_css_src, os.path.join(css_target_dir, 'style.css'))
+                logger.info(f"添加style.css 完成")
             else:
-                messagebox.showwarning("警告", "自定义样式表文件 style.css 不存在")
+                logger.warning(f"自定义style.css文件不存在: {custom_css_src}")
 
             # 6. 在所有 XHTML 文件中添加样式表链接并清理样式
             for root, _, files in os.walk(temp_dir):
@@ -236,12 +239,12 @@ class EpubProcessor:
                 # 生成ncx 更新opf
                 success, msg = EpubNCXGenerator.generate_ncx(opf_path)
                 if not success:
-                    messagebox.showwarning("NCX生成警告", msg)
+                    logger.warning(f"NCX生成警告: {msg}")
             if self.convert_epub_version_enabled.get():               
                 # opf修改Epub版本为2.0 并删除nav文件
                 success, msg = EpubNCXGenerator.convert_to_epub2(opf_path)
                 if not success:
-                    messagebox.showwarning("版本转换警告", msg)
+                    logger.warning(f"版本转换警告: {msg}")
                 # 删除nav（如果存在）
                 nav_item = opf_soup.find('item', properties='nav')
                 if nav_item:
@@ -413,7 +416,7 @@ class EpubProcessor:
                 image_mapping[old_name] = new_name
                 logger.debug(f"[映射] {old_name} → {new_name}")
             # ===== 4. 执行图片转换 =====
-            converter_path = os.path.join(os.path.dirname(__file__), "image_converter.exe")
+            converter_path = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), "image_converter.exe")
             if not os.path.exists(converter_path):
                 raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
             # 生成绝对路径列表文件
