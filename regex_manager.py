@@ -4,6 +4,7 @@ from pathlib import Path
 import tkinter as tk
 from loguru import logger
 from tooltip import ToolTip # tooltip.py
+import sys
 
 class RegexManager:
     def __init__(self, root, config_path="config.ini"):
@@ -25,6 +26,24 @@ class RegexManager:
             ("加载默认正则", self.reset_to_default)]
         for text, cmd in buttons:
             tk.Button(btn_frame, text=text, command=cmd, font=("宋体", 12)).pack(side=tk.LEFT, padx=2)
+
+        # 添加日志级别下拉框
+        from tkinter import ttk
+        log_level_var = tk.StringVar(btn_frame)
+        log_level_var.set("info")  # 默认值
+        log_levels = ["info", "debug"]
+        log_level_menu = ttk.Combobox(btn_frame, textvariable=log_level_var, values=log_levels, state="readonly", font=("宋体", 12), width=5)
+        log_level_menu.pack(side=tk.LEFT, padx=2)
+        log_level_menu.bind("<<ComboboxSelected>>", lambda e: self.set_log_level(log_level_var.get()))
+        # 初始化时设置日志级别
+        self.set_log_level("info")
+
+    def set_log_level(self, level):
+        """设置日志级别"""
+        logger.remove()
+        logger.add(sys.stderr, level=level.upper())
+        logger.log(level.upper(), "日志级别: {}", level)
+
 
     def load_config(self):
         """加载配置"""
@@ -94,11 +113,11 @@ class RegexManager:
         entry_frame = tk.Frame(self.frame)
         entry_frame.pack(fill=tk.X, pady=2)
         # 正则框
-        regex_entry = tk.Entry(entry_frame, font=("宋体", 12))
+        regex_entry = tk.Entry(entry_frame, font=("宋体", 12), width=15)
         regex_entry.insert(0, regex)
         regex_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         # 替换框
-        replace_entry = tk.Entry(entry_frame, font=("宋体", 12))
+        replace_entry = tk.Entry(entry_frame, font=("宋体", 12), width=10)
         replace_entry.insert(0, replace)
         replace_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         # 绑定拖动事件到所有子控件（除删除按钮）
@@ -114,7 +133,7 @@ class RegexManager:
         replace_tooltip = ToolTip(replace_entry, tooltip or "", follow_widget=regex_entry)
         # 删除按钮（不绑定拖动）
         del_btn = tk.Button(
-            entry_frame, text="×", font=("宋体", 11),
+            entry_frame, text="×", font=("宋体", 10),
             command=lambda: self._delete_entry(entry_frame)
         )
         del_btn.pack(side=tk.RIGHT)
@@ -134,7 +153,7 @@ class RegexManager:
         font = ("宋体", 12)
         # 文本编辑框
         text = tk.Text(top, width=40, height=4, font=font, padx=5, pady=5)
-        text.pack()
+        text.pack(padx=3, pady=3)
         text.insert("1.0", regex_tooltip.text or "")
         top.focus_set()  # 焦到窗口到文本
         text.focus_set()
@@ -148,7 +167,7 @@ class RegexManager:
                 setattr(replace_tooltip, 'text', text.get("1.0", "end-1c").strip()),
                 top.destroy()
             ]
-        ).pack(pady=(0, 5))
+        ).pack(pady=(0, 3))
 
     def apply_rules(self, content):
         """应用所有正则规则到指定内容"""

@@ -1,7 +1,8 @@
-﻿import os
+import os
 import re
 import uuid
 from bs4 import BeautifulSoup
+from loguru import logger
 
 class EpubNCXGenerator:
     @staticmethod
@@ -15,8 +16,10 @@ class EpubNCXGenerator:
             ncx_path = os.path.join(opf_dir, 'toc.ncx')
             nav_path = EpubNCXGenerator._find_nav_path(opf_path)
             if os.path.exists(ncx_path):
+                logger.info("toc.ncx已存在，跳过生成")
                 return True, "toc.ncx已存在，跳过生成"
             if not nav_path:
+                logger.error("未找到有效的NAV文件")
                 return False, "未找到有效的NAV文件"
             # 解析NAV文件获取目录结构
             toc_entries = EpubNCXGenerator._parse_nav(nav_path, opf_dir)
@@ -31,9 +34,11 @@ class EpubNCXGenerator:
             # 更新OPF引用
             EpubNCXGenerator._update_opf_reference(opf_path)
             
-            return True, "NCX生成成功（基于NAV）"
+            logger.success("ncx生成成功（基于NAV）")
+            return True, "ncx生成成功（基于NAV）"
         except Exception as e:
-            return False, f"NCX生成失败: {str(e)}"
+            logger.error(f"ncx生成失败: {str(e)}")
+            return False, f"ncx生成失败: {str(e)}"
 
     @staticmethod
     def _get_book_title_from_opf(opf_path):
@@ -60,13 +65,15 @@ class EpubNCXGenerator:
                 f.seek(0)
                 f.write(content)
                 f.truncate()
+            logger.success("修改epub版本号成功")
             return True, "修改epub版本号成功"
         except Exception as e:
+            logger.error(f"修改epub版本号失败: {str(e)}")
             return False, f"修改epub版本号失败: {str(e)}"
 
     @staticmethod
     def _find_nav_path(opf_path):
-        """智能查找导航文件路径"""
+        """查找nav导航文件路径"""
         with open(opf_path, 'r', encoding='utf-8') as f:
             opf_soup = BeautifulSoup(f.read(), 'xml')
         # 查找EPUB3导航文件
@@ -81,7 +88,7 @@ class EpubNCXGenerator:
         nav_path = os.path.normpath(os.path.join(opf_dir, nav_href))
         # 验证文件存在性
         if not os.path.exists(nav_path):
-            print(f"警告：导航文件不存在 {nav_path}")
+            logger.warning(f"nav导航文件不存在 {nav_path}")
             return None
         
         return nav_path
