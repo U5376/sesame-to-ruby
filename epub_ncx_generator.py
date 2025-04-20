@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+from pathlib import Path
 from bs4 import BeautifulSoup
 from loguru import logger
 
@@ -12,10 +13,10 @@ class EpubNCXGenerator:
         返回：(success, message)
         """
         try:
-            opf_dir = os.path.dirname(opf_path)
-            ncx_path = os.path.join(opf_dir, 'toc.ncx')
+            opf_dir = Path(opf_path).parent
+            ncx_path = opf_dir / 'toc.ncx'
             nav_path = EpubNCXGenerator._find_nav_path(opf_path)
-            if os.path.exists(ncx_path):
+            if ncx_path.exists():
                 logger.info("toc.ncx已存在，跳过生成")
                 return True, "toc.ncx已存在，跳过生成"
             if not nav_path:
@@ -24,7 +25,7 @@ class EpubNCXGenerator:
             # 解析NAV文件获取目录结构
             toc_entries = EpubNCXGenerator._parse_nav(nav_path, opf_dir)
             # 生成NCX内容
-            ncx_path = os.path.join(opf_dir, 'toc.ncx')
+            ncx_path = opf_dir / 'toc.ncx'
             uid = EpubNCXGenerator._get_uid_from_opf(opf_path)
             book_title = EpubNCXGenerator._get_book_title_from_opf(opf_path)
             
@@ -50,26 +51,29 @@ class EpubNCXGenerator:
 
     @staticmethod
     def convert_to_epub2(opf_path):
-        """修改epub版本号为2"""
+        """修改epub版本为2.0，并删除 nav.xhtml"""
         try:
-            with open(opf_path, 'r+', encoding='utf-8') as f:
-                content = f.read()
-                # 修改package声明
-                content = re.sub(
-                    r'<package[^>]+>',
-                    '<package version="2.0" unique-identifier="BookId" xmlns="http://www.idpf.org/2007/opf">',
-                    content
-                )
-                content = re.sub(r'\s+prefix="[^"]+"', '', content)  # 确保删除epub3.0 prefix 属性
-                # 写回文件
-                f.seek(0)
-                f.write(content)
-                f.truncate()
-            logger.success("修改epub版本号成功")
-            return True, "修改epub版本号成功"
+            opf_path = Path(opf_path)
+            content = opf_path.read_text(encoding='utf-8')
+            content = re.sub(
+                r'<package[^>]+>',
+                '<package version="2.0" unique-identifier="BookId" xmlns="http://www.idpf.org/2007/opf">',
+                content
+            )
+            content = re.sub(r'\s+prefix="[^"]+"', '', content) # 删除 prefix 属性（EPUB 3 专属）
+            opf_path.write_text(content, encoding='utf-8')
+            soup = BeautifulSoup(content, 'xml')
+            nav_item = soup.find('item', properties='nav')
+            if nav_item:
+                nav_path = opf_path.parent / nav_item['href']
+                if nav_path.exists():
+                    nav_path.unlink()
+                    logger.debug(f"已删除 nav 文件: {nav_path}")
+            logger.success("修改epub版本号完毕")
+            return True, "修改epub版本号完毕"
         except Exception as e:
-            logger.error(f"修改epub版本号失败: {str(e)}")
-            return False, f"修改epub版本号失败: {str(e)}"
+            logger.error(f"修改epub版本号失败: {e}")
+            return False, f"修改epub版本号失败: {e}"
 
     @staticmethod
     def _find_nav_path(opf_path):
@@ -83,11 +87,11 @@ class EpubNCXGenerator:
             nav_item = opf_soup.find('item', {'media-type': 'application/x-dtbncx+xml'})
         if not nav_item:
             return None
-        opf_dir = os.path.dirname(opf_path)
+        opf_dir = Path(opf_path).parent
         nav_href = nav_item.get('href', '')
-        nav_path = os.path.normpath(os.path.join(opf_dir, nav_href))
+        nav_path = (opf_dir / nav_href).resolve()
         # 验证文件存在性
-        if not os.path.exists(nav_path):
+        if not nav_path.exists():
             logger.warning(f"nav导航文件不存在 {nav_path}")
             return None
         
@@ -110,11 +114,11 @@ class EpubNCXGenerator:
             for li in list_tag.find_all('li', recursive=False):
                 if a := li.find('a', href=True):
                     href = a['href'].split('#')[0]
-                    full_path = os.path.normpath(os.path.join(base_dir, href))
+                    full_path = (Path(base_dir) / href).resolve()
                     entry = {
                         'title': a.get_text(strip=True),
                         'href': href,
-                        'file_path': full_path,
+                        'file_path': str(full_path),
                         'depth': depth,
                         'children': []
                     }

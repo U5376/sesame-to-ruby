@@ -1,5 +1,4 @@
 import re
-import configparser
 from pathlib import Path
 import tkinter as tk
 from loguru import logger
@@ -7,11 +6,12 @@ from tooltip import ToolTip # tooltip.py
 import sys
 
 class RegexManager:
-    def __init__(self, root, config_path="config.ini"):
+    def __init__(self, root, config_path="config.ini", log_level_var=None):
         self.root = root
         self.config_file = Path(config_path)
         self.regex_entries = []
         self.tooltips = []
+        self.log_level_var = log_level_var  # 新增
         self.init_ui()
         self.load_config()
 
@@ -21,13 +21,15 @@ class RegexManager:
         self.frame.pack(fill=tk.BOTH, padx=5, pady=5, expand=True)
         btn_frame = tk.Frame(self.frame)
         btn_frame.pack(fill=tk.X, pady=3)
-        buttons = [("添加正则", self.add_entry),
-            ("保存正则", self.save_config),
-            ("加载默认正则", self.reset_to_default)]
+        buttons = [
+            ("添加正则", self.add_entry),
+            ("保存设置", self.save_config),
+            ("加载默认正则", self.reset_to_default)
+        ]
         for text, cmd in buttons:
             tk.Button(btn_frame, text=text, command=cmd, font=("宋体", 12)).pack(side=tk.LEFT, padx=2)
 
-        # 添加日志级别下拉框
+        # 添加日志级别下拉框（原始UI：放在btn_frame里，不用log_level_var参数）
         from tkinter import ttk
         log_level_var = tk.StringVar(btn_frame)
         log_level_var.set("info")  # 默认值
@@ -44,6 +46,9 @@ class RegexManager:
         logger.add(sys.stderr, level=level.upper())
         logger.log(level.upper(), "日志级别: {}", level)
 
+    def save_config(self):
+        """空实现，主程序会重绑定按钮为实际保存方法"""
+        pass
 
     def load_config(self):
         """加载配置"""
@@ -230,25 +235,23 @@ class RegexManager:
         self.regex_entries.clear()
         self._create_default_rules()
 
-    def save_config(self):
-        """生成规则行配置"""
-        config_content = "[RegexRules]\n"
+    def get_rules_content(self):
+        """返回正则规则文本块（用于写入配置文件）"""
+        content = "[RegexRules]\n"
         for i, entry in enumerate(self.regex_entries):
             regex_entry, replace_entry, frame, regex_tooltip, replace_tooltip = entry
-            if not frame.winfo_exists(): continue
-            # 处理多行tooltip：每行添加缩进（如\t）
+            if not frame.winfo_exists():
+                continue
             tooltip_text = regex_tooltip.text if regex_tooltip else ""
-            formatted_tooltip = tooltip_text.replace("\n", "\n\t")  # 换行后添加制表符
+            formatted_tooltip = tooltip_text.replace("\n", "\n\t")
             rule_block = (
                 f"rule_{i+1}\n"
                 f"regex={regex_entry.get()}\n"
                 f"replace={replace_entry.get()}\n"
-                f"tooltip={formatted_tooltip}\n\n"  # 使用格式化后的文本
+                f"tooltip={formatted_tooltip}\n\n"
             )
-            config_content += rule_block
-        with open(self.config_file, 'w', encoding='utf-8', newline='\n') as f:
-            f.write(config_content.strip())
-        logger.info("正则规则已保存")
+            content += rule_block
+        return content.strip()
 
     def _get_tooltip_text(self, entry_widget):
         """安全获取工具提示内容"""
