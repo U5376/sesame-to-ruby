@@ -41,11 +41,15 @@ class EpubProcessor:
         # 第一行：操作按钮
         read_button = tk.Button(main_frame, text='读取epub', command=self.open_file_dialog, font=FONT)
         read_button.grid(row=0, column=0, padx=5, pady=2, sticky='w')
-        ToolTip(read_button, text="")  # 预留空位
+        ToolTip(read_button, text="加载单个epub文件")
 
         convert_button = tk.Button(main_frame, text='开始转换', command=self.start_conversion, font=FONT)
         convert_button.grid(row=0, column=1, padx=5, pady=2, sticky='w')
-        ToolTip(convert_button, text="")  # 预留空位
+        ToolTip(convert_button, text="转换加载的单个epub文件")
+
+        batch_button = tk.Button(main_frame, text='批量转换', command=self.batch_convert_epubs, font=FONT)
+        batch_button.grid(row=0, column=2, padx=5, pady=2, sticky='w')
+        ToolTip(batch_button, text="选择多个epub后立即批量转换\n在epub所在目录下创建output文件夹\n转换后的epub放入output，文件名为原epub名")
 
         # 第二行：功能按钮
         class_button = tk.Button(main_frame, text='class列表', command=self.show_class_list, font=FONT)
@@ -84,7 +88,7 @@ class EpubProcessor:
             ("merge_xhtml_enabled", "Xhtml章节间合并", "根据目录合并章节间文件"),
             ("delete_style_enabled", "删除自带Style并添加自定义样式表", "清理原有样式跟opf竖排属性\n添加css文件及更新引用\n考虑规格化头部信息"),
             ("generate_ncx_enabled", "生成ncx并更新opf", ""),
-            ("convert_epub_version_enabled", "转Epub2.0并删除nav.xhtml", "将EPUB版本转换为2.0\n移除nav.xhtml")
+            ("convert_epub_version_enabled", "转Epub2.0并删除nav.xhtml", "将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明")
         ]
         for var_name, text, tip in flags_with_tooltips:
             var = tk.BooleanVar(value=True)
@@ -104,8 +108,8 @@ class EpubProcessor:
         image_check.pack(side=tk.LEFT)
         # ToolTip(image_check, text="")
         image_entry = tk.Entry(f_image, textvariable=self.image_params_var, width=30, font=FONT)
-        image_entry.pack(side=tk.LEFT)
-        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0")
+        image_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n-w 线程数 默认2")
         f_image.pack(fill=tk.X, anchor='w')        
 
         self.config_file = os.path.join(os.path.dirname(__file__), "config.ini")
@@ -135,6 +139,22 @@ class EpubProcessor:
         if output_filename:
             self.process_epub(output_filename)
 
+    def batch_convert_epubs(self):
+        epub_paths = filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])
+        if not epub_paths:
+            return
+        for epub_path in epub_paths:
+            try:
+                epub_path = Path(epub_path)
+                output_dir = epub_path.parent / "output"
+                output_dir.mkdir(exist_ok=True)
+                output_filename = output_dir / epub_path.name
+                self.epub_path = str(epub_path)
+                self.process_epub(str(output_filename))
+                logger.info(f"批量转换完成: {output_filename}")
+            except Exception as e:
+                logger.error(f"批量转换失败: {epub_path} - {e}")
+
     def process_epub(self, output_filename):
         logger.info(f"开始处理epub文件: {self.epub_path}")
         class_name = self.class_name_var.get()
@@ -148,7 +168,7 @@ class EpubProcessor:
             logger.debug(f"OPF文件路径: {opf_full_path}")
 
             # 图片转换
-            if self.convert_epub_version_enabled.get():
+            if self.convert_images_var.get():
                 self.convert_epub_images(temp_dir)
 
             # 删除自带样式并添加自定义样式表并更新opf跟页面引用

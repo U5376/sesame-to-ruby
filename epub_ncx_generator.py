@@ -51,7 +51,7 @@ class EpubNCXGenerator:
 
     @staticmethod
     def convert_to_epub2(opf_path):
-        """修改epub版本为2.0，并删除 nav.xhtml"""
+        """修改epub版本为2.0，并删除 nav.xhtml，并确保epub2.0 cover声明"""
         try:
             opf_path = Path(opf_path)
             content = opf_path.read_text(encoding='utf-8')
@@ -69,7 +69,35 @@ class EpubNCXGenerator:
                 if nav_path.exists():
                     nav_path.unlink()
                     logger.debug(f"已删除 nav 文件: {nav_path}")
-            logger.success("修改epub版本号完毕")
+            # 查找manifest中cover图片item（优先 properties="cover-image" 的item）
+            manifest = soup.find('manifest')
+            cover_item = None
+            if manifest:
+                for item in manifest.find_all('item'):
+                    if item.get('properties', '') == 'cover-image':
+                        cover_item = item
+                        break
+                # 如果没有，再找 id=cover 或 id包含cover
+                if not cover_item:
+                    for item in manifest.find_all('item'):
+                        if item.get('id', '').lower() == 'cover' or 'cover' in item.get('id', '').lower():
+                            cover_item = item
+                            break
+            # 查找metadata中是否已有cover meta
+            metadata = soup.find('metadata')
+            has_cover_meta = False
+            if metadata:
+                for meta in metadata.find_all('meta'):
+                    if meta.get('name') == 'cover':
+                        has_cover_meta = True
+                        break
+            # 如果manifest有cover图片且metadata没有cover meta，则添加
+            if cover_item and not has_cover_meta and metadata:
+                new_meta = soup.new_tag('meta', attrs={'name': 'cover', 'content': cover_item['id']})
+                metadata.append(new_meta)
+                logger.debug(f"已添加epub2.0 cover meta: id={cover_item['id']}")
+                opf_path.write_text(str(soup), encoding='utf-8')
+            logger.success("修改epub版本号并添加cover声明√")
             return True, "修改epub版本号完毕"
         except Exception as e:
             logger.error(f"修改epub版本号失败: {e}")
