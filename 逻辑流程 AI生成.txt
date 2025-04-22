@@ -1,11 +1,24 @@
-﻿文件列表
+文件列表
 主程序sesame-to-ruby.py
 epub_ncx_generator.py #生成toc.ncx 转epub2.0 更新opf信息 移除nav.xhtml
+regex_manager.py #管理正则表达式规则和工具提示
+tooltip.py #提供GUI元素的悬浮提示功能
+image_converter.py/exe #处理图片格式转换
 
 
 1. EpubProcessor.__init__（初始化界面）
    - 创建GUI窗口，加载图标
-   - 初始化默认正则规则（add_default_regex_rules）
+   - 初始化RegexManager组件：
+     * 加载config.ini中的正则规则
+     * 若无配置则创建默认规则（清理body/div/p标签样式等）
+     * 为每个规则添加可编辑的悬浮提示（ToolTip）
+   - 绑定规则保存按钮到主程序保存方法
+   - 初始化批量转换按钮和功能
+   - 初始化其他功能按钮：
+     * 样式收集分析(show_class_list)
+     * 目录排除(show_exclude_dialog)
+     * 重置设置(reset_app_settings)
+   - 加载应用设置(load_app_settings)
 
 2. EpubProcessor.open_file_dialog（文件选择）
    - 用户选择输入/输出EPUB文件
@@ -34,7 +47,9 @@ epub_ncx_generator.py #生成toc.ncx 转epub2.0 更新opf信息 移除nav.xhtml
       - 合并多个<rt>内容（merged_content生成）
    
    b. EpubProcessor.apply_regex_rules（正则预处理）
-      - 执行预设规则替换（如清理body/div/p标签样式）
+      - 从RegexManager获取所有已编译的正则规则
+      - 按顺序应用每条规则到文件内容
+      - 处理正则替换错误并记录日志
    
    c. EpubProcessor.modify_html（傍点转换）
       - 转换class指定的<span>为<ruby>（创建rt标签并添加"・"）
@@ -43,15 +58,52 @@ epub_ncx_generator.py #生成toc.ncx 转epub2.0 更新opf信息 移除nav.xhtml
       - 包裹<img>到<div class="illus">（创建新div标签）
       - 转换SVG为<img>（替换svg标签）
 
+   e. EpubProcessor.process_blank_lines（空行处理）
+      - 删除指定数量的空行
+      - 限制连续空行的最大数量
+
 8. EpubProcessor.merge_xhtml_files（章节合并）
-   - 按目录结构合并文件（解析spine顺序）
-   - 添加段落间距<br>（插入<p><br/></p>）
-   - 清理已合并文件（os.remove）
+   - 解析OPF文件获取spine顺序和目录结构
+   - 根据目录条目确定合并范围
+   - 主文件保留，合并文件内容转移到主文件
+   - 添加分隔符（双br标签夹hr标签）
+   - 更新OPF文件，移除已合并文件的引用
+   - 支持用户排除特定目录条目不合并
 
-9. EpubProcessor._update_opf_reference（OPF更新）
-   - 移除已合并文件的manifest项（BeautifulSoup删除item）
-   - 更新spine引用顺序
+9. EpubProcessor.convert_epub_images（图片转换）
+   - 扫描EPUB中所有图片文件
+   - 使用image_converter.exe转换图片格式
+   - 更新HTML文件中的图片引用
+   - 清理旧图片文件
+   - 更新OPF清单中的媒体类型
 
-10. 最终打包
+10. EpubProcessor.batch_convert_epubs（批量转换）
+    - 选择多个EPUB文件
+    - 为每个文件创建输出目录(output)
+    - 依次处理每个EPUB文件
+    - 保存转换结果到输出目录
+    - 记录转换状态和错误
+
+11. 应用设置管理
+    - 保存设置(save_app_settings)
+      * 保存正则规则到config.ini
+      * 保存应用配置选项
+    - 加载设置(load_app_settings)
+      * 从config.ini读取配置
+      * 恢复界面状态
+    - 重置设置(reset_app_settings)
+      * 恢复默认选项值
+
+12. 辅助功能
+    - 样式收集分析(show_class_list)
+      * 扫描EPUB中使用的CSS类
+      * 显示span和图片的特殊类
+      * 支持查看样式定义详情
+    - 目录排除(show_exclude_dialog)
+      * 解析EPUB目录结构
+      * 提供GUI选择要排除合并的章节
+      * 保存用户选择
+
+13. 最终打包
     - 重新压缩为EPUB（zipfile.ZipFile写入）
     - 保留META-INF/container.xml结构

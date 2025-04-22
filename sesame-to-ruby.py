@@ -38,32 +38,19 @@ class EpubProcessor:
         main_frame = tk.Frame(root)
         main_frame.pack(padx=5, pady=5)
 
-        # 第一行：操作按钮
-        read_button = tk.Button(main_frame, text='读取epub', command=self.open_file_dialog, font=FONT)
-        read_button.grid(row=0, column=0, padx=5, pady=2, sticky='w')
-        ToolTip(read_button, text="加载单个epub文件")
-
-        convert_button = tk.Button(main_frame, text='开始转换', command=self.start_conversion, font=FONT)
-        convert_button.grid(row=0, column=1, padx=5, pady=2, sticky='w')
-        ToolTip(convert_button, text="转换加载的单个epub文件")
-
-        batch_button = tk.Button(main_frame, text='批量转换', command=self.batch_convert_epubs, font=FONT)
-        batch_button.grid(row=0, column=2, padx=5, pady=2, sticky='w')
-        ToolTip(batch_button, text="选择多个epub后立即批量转换\n在epub所在目录下创建output文件夹\n转换后的epub放入output，文件名为原epub名")
-
-        # 第二行：功能按钮
-        class_button = tk.Button(main_frame, text='class列表', command=self.show_class_list, font=FONT)
-        class_button.grid(row=1, column=0, padx=5, pady=2)
-        ToolTip(class_button, text="epub内所使用的class列表\nspan列表\n图片class列表")
-
-        exclude_button = tk.Button(main_frame, text='排除合并', command=self.show_exclude_dialog, font=FONT)
-        exclude_button.grid(row=1, column=1, padx=5, pady=2)
-        ToolTip(exclude_button, text="章节合并功能排除选定的目录条目")
-
-        # 重置设置按钮
-        reset_button = tk.Button(main_frame, text='重置设置', command=self.reset_app_settings, font=FONT)
-        reset_button.grid(row=1, column=2, padx=5, pady=2)
-        ToolTip(reset_button, text="重置所有设置为默认状态")
+        # 按钮配置：(文本, 命令, grid(row, col), tooltip)
+        btn_cfgs = [
+            ('读取epub', self.open_file_dialog, (0, 0), "加载单个epub文件"),
+            ('开始转换', self.start_conversion, (0, 1), "转换加载的单个epub文件"),
+            ('批量转换', self.batch_convert_epubs, (0, 2), "选择多个epub后立即批量转换\n在epub所在目录下创建output文件夹\n转换后的epub放入output，文件名为原epub名"),
+            ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
+            ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目"),
+            ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态"),
+        ]
+        for text, cmd, (row, col), tip in btn_cfgs:
+            btn = tk.Button(main_frame, text=text, command=cmd, font=FONT)
+            btn.grid(row=row, column=col, padx=5, pady=2, sticky='w')
+            ToolTip(btn, text=tip)
 
         # 用于自动收集所有设置变量
         self._settings_vars_dict = {}
@@ -94,23 +81,43 @@ class EpubProcessor:
             var = tk.BooleanVar(value=True)
             setattr(self, var_name, var)
             self._settings_vars_dict[var_name] = var
-            cb = tk.Checkbutton(root, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
-            cb.pack(anchor='w')
-            ToolTip(cb, tip)
+            if var_name == "merge_xhtml_enabled":
+                f_merge = tk.Frame(root)
+                cb = tk.Checkbutton(f_merge, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
+                cb.pack(side=tk.LEFT)
+                ToolTip(cb, tip)
+                # 删除空行下拉框
+                self.merge_remove_blank_lines_var = tk.StringVar(value='-')
+                self._settings_vars_dict['merge_remove_blank_lines_var'] = self.merge_remove_blank_lines_var
+                remove_blank_combo = ttk.Combobox(f_merge, textvariable=self.merge_remove_blank_lines_var, width=2, state="readonly",
+                                                  values=['-'] + [str(i) for i in range(1, 11)], font=FONT)
+                remove_blank_combo.pack(side=tk.LEFT, padx=(5, 0))
+                ToolTip(remove_blank_combo, text="删除指定的空行数量")
+                # 限制连续空行下拉框
+                self.merge_limit_blank_lines_var = tk.StringVar(value='-')
+                self._settings_vars_dict['merge_limit_blank_lines_var'] = self.merge_limit_blank_lines_var
+                limit_blank_combo = ttk.Combobox(f_merge, textvariable=self.merge_limit_blank_lines_var, width=2, state="readonly",
+                                                 values=['-'] + [str(i) for i in range(1, 11)], font=FONT)
+                limit_blank_combo.pack(side=tk.LEFT, padx=(5, 0))
+                ToolTip(limit_blank_combo, text="限制连续空行的行数")
+                f_merge.pack(anchor='w')
+            else:
+                cb = tk.Checkbutton(root, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
+                cb.pack(anchor='w')
+                ToolTip(cb, tip)
 
         # 图片转换设置
         self.convert_images_var = tk.BooleanVar(value=True)
         self._settings_vars_dict['convert_images_var'] = self.convert_images_var
-        self.image_params_var = tk.StringVar(value="-f webp -q 85 -H 300 -s 1.4")
+        self.image_params_var = tk.StringVar(value="-f webp -q80 -H 300 -s 1.4 -w7")
         self._settings_vars_dict['image_params_var'] = self.image_params_var
         f_image = tk.Frame(root)
         image_check = tk.Checkbutton(f_image, text="转换图片", variable=self.convert_images_var, font=FONT)
         image_check.pack(side=tk.LEFT)
-        # ToolTip(image_check, text="")
         image_entry = tk.Entry(f_image, textvariable=self.image_params_var, width=30, font=FONT)
         image_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
         ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n-w 线程数 默认2")
-        f_image.pack(fill=tk.X, anchor='w')        
+        f_image.pack(fill=tk.X, anchor='w')
 
         self.config_file = os.path.join(os.path.dirname(__file__), "config.ini")
         self.load_app_settings()
@@ -220,6 +227,9 @@ class EpubProcessor:
             # html章节间合并
             if self.merge_xhtml_enabled.get():
                 self.merge_xhtml_files(temp_dir)
+
+            # 空行处理
+            self.process_blank_lines(temp_dir)
 
             # 重新打包 EPUB 文件
             with zipfile.ZipFile(output_filename, "w", zipfile.ZIP_DEFLATED) as zip_ref:
@@ -387,6 +397,68 @@ class EpubProcessor:
         # 更新OPF文件
         opf_path.write_text(str(opf_soup), encoding='utf-8')
         logger.info("章节间Xhtml合并 完成")
+
+    def process_blank_lines(self, temp_dir):
+        """删除空行数量限制连续空行"""
+        remove_blank = self.merge_remove_blank_lines_var.get()
+        limit_blank = self.merge_limit_blank_lines_var.get()
+        if remove_blank == '-' and limit_blank == '-':
+            return
+        temp_dir = Path(temp_dir)
+        for file_path in temp_dir.rglob("*"):
+            if file_path.suffix.lower() not in ('.xhtml', '.html'):
+                continue
+            soup = BeautifulSoup(file_path.read_text(encoding='utf-8'), 'html.parser')
+            def is_blank_tag(tag):
+                if tag.name == 'br': return True
+                if tag.name == 'p':
+                    children = [c for c in tag.children if isinstance(c, (str, type(tag)))]
+                    if len(children) == 1 and getattr(children[0], 'name', None) == 'br': return True
+                    if not tag.get_text(strip=True) and all((getattr(c, 'name', None) == 'br' or (isinstance(c, str) and not c.strip())) for c in tag.contents): return True
+                    return False
+                if tag.name == 'div':
+                    for c in tag.contents:
+                        if isinstance(c, str) and c.strip(): return False
+                        if hasattr(c, 'name'):
+                            if c.name == 'br': continue
+                            if c.name == 'p' and is_blank_tag(c): continue
+                            return False
+                    return True
+                return False
+            def flatten_nodes(parent):
+                for node in parent.children:
+                    if isinstance(node, str):
+                        if not node.strip(): continue
+                        yield node
+                    elif node.name in ['br', 'p', 'div']:
+                        if node.name == 'div': yield from flatten_nodes(node)
+                        else: yield node
+                    else: yield node
+            def group_blanks(nodes):
+                groups, group = [], []
+                for node in nodes:
+                    if isinstance(node, str):
+                        if not node.strip(): continue
+                        if group: groups.append(group); group = []
+                        continue
+                    if hasattr(node, 'name') and is_blank_tag(node): group.append(node)
+                    else:
+                        if group: groups.append(group); group = []
+                if group: groups.append(group)
+                return groups
+            flat_nodes = list(flatten_nodes(soup.body if soup.body else soup))
+            blank_groups = group_blanks(flat_nodes)
+            # 先执行空行删除，再执行空行限制
+            if remove_blank != '-':
+                to_delete = int(remove_blank)
+                for group in blank_groups:
+                    for t in group[:to_delete]: t.decompose()
+                blank_groups = group_blanks(list(flatten_nodes(soup.body if soup.body else soup)))
+            if limit_blank != '-':
+                limit = int(limit_blank)
+                for group in blank_groups:
+                    for t in group[limit:]: t.decompose()
+            file_path.write_text(str(soup), encoding='utf-8')
 
     def _get_opf_path(self, temp_dir):
         """解析container.xml获取opf文件路径"""
@@ -666,7 +738,7 @@ class EpubProcessor:
         return str(soup)
 
     def show_exclude_dialog(self):
-        """显示目录条目选择对话框"""
+        """章节合并排除对话框"""
         if not hasattr(self, 'epub_path'):
             messagebox.showwarning("警告", "请先选择EPUB文件")
             return
@@ -727,6 +799,7 @@ class EpubProcessor:
         confirm_btn.pack(side="bottom", pady=5)
 
     def show_class_list(self):
+        """class样式收集分析对话框"""
         if not hasattr(self, 'epub_path'):
             messagebox.showwarning("警告", "请先选择EPUB文件")
             return
@@ -863,7 +936,7 @@ class EpubProcessor:
                 if name == 'class_name_var':
                     var.set('em-sesame|em-dot')
                 elif name == 'image_params_var':
-                    var.set("-f webp -q 85 -H 300 -s 1.4")
+                    var.set("-f webp -q80 -H 300 -s 1.4 -w7")
                 else:
                     var.set('')
 
