@@ -671,7 +671,7 @@ class EpubProcessor:
                 img_tag.extract()  # 删除原始图片标签
             rt_tags = ruby_tag.find_all('rt')  # 查找所有的 <rt> 标签
             original_content = ruby_tag.get_text()  # 获取原始内容（不包含 <rt> 标签）
-            merged_content = ''.join(rt_tag.string.strip() if rt_tag.string else '' for rt_tag in rt_tags)  # 合并 <rt> 标签内的内容
+            merged_content = ''.join(rt_tag.get_text(strip=True)for rt_tag in rt_tags if rt_tag.get_text(strip=True)) # 合并 <rt> 标签 忽略所有的嵌套标签
             for rt_tag in rt_tags:
                 rt_tag.extract()  # 删除所有的 <rt> 标签
             rt_tag = soup.new_tag('rt')  # 创建一个新的 <rt> 标签
@@ -696,29 +696,21 @@ class EpubProcessor:
                     new_div.append(img_tag.extract())
                     p.insert_before(new_div)
 
-        for svg in soup.find_all('svg'):
-            image_tag = svg.find('image')
-            if image_tag:
-                # 兼容命名空间属性（xlink:href）
-                href = image_tag.get('xlink:href') or image_tag.get('{http://www.w3.org/1999/xlink}href')
-                if href:
-                    new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
-                    new_img = soup.new_tag('img', src=href, alt='')
-                    new_div.append(new_img)
-                    svg.replace_with(new_div)
-
-        # ops:switch 中的 SVG 也处理
-        for switch in soup.find_all('ops:switch'):
-            svg = switch.find('svg')
-            if svg:
-                image_tag = svg.find('image')
+        # 处理 svg 和 ops:switch
+        for tag in soup.find_all(['svg', 'ops:switch']):
+            if tag.name == 'svg' or (tag.name == 'ops:switch' and tag.find('svg')):
+                image_tag = tag.find('image')
                 if image_tag:
                     href = image_tag.get('xlink:href') or image_tag.get('{http://www.w3.org/1999/xlink}href')
                     if href:
                         new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
                         new_img = soup.new_tag('img', src=href, alt='')
                         new_div.append(new_img)
-                        switch.replace_with(new_div)
+                        # 如果是 ops:switch 标签，直接替换整个标签
+                        if tag.name == 'ops:switch':
+                            tag.replace_with(new_div)
+                        else:  # 如果是 svg，替换 svg
+                            tag.replace_with(new_div)
 
     def modify_html(self, html, class_names):
         soup = BeautifulSoup(html, 'html.parser')

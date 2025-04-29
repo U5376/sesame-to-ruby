@@ -26,7 +26,7 @@ class ToolTip:
 
         # 计算提示窗口位置
         x = self.widget.winfo_rootx() + 30
-        y = self.widget.winfo_rooty() + 20
+        y = self.widget.winfo_rooty() + 25
 
         # 创建提示窗口
         self.tip_window = tk.Toplevel(self.widget)
