@@ -86,20 +86,15 @@ class EpubProcessor:
                 cb = tk.Checkbutton(f_merge, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
                 cb.pack(side=tk.LEFT)
                 ToolTip(cb, tip)
-                # 删除空行下拉框
-                self.merge_remove_blank_lines_var = tk.StringVar(value='-')
-                self._settings_vars_dict['merge_remove_blank_lines_var'] = self.merge_remove_blank_lines_var
-                remove_blank_combo = ttk.Combobox(f_merge, textvariable=self.merge_remove_blank_lines_var, width=2, state="readonly",
-                                                  values=['-'] + [str(i) for i in range(1, 11)], font=FONT)
-                remove_blank_combo.pack(side=tk.LEFT, padx=(5, 0))
-                ToolTip(remove_blank_combo, text="删除指定的空行数量")
-                # 限制连续空行下拉框
-                self.merge_limit_blank_lines_var = tk.StringVar(value='-')
-                self._settings_vars_dict['merge_limit_blank_lines_var'] = self.merge_limit_blank_lines_var
-                limit_blank_combo = ttk.Combobox(f_merge, textvariable=self.merge_limit_blank_lines_var, width=2, state="readonly",
-                                                 values=['-'] + [str(i) for i in range(1, 11)], font=FONT)
-                limit_blank_combo.pack(side=tk.LEFT, padx=(5, 0))
-                ToolTip(limit_blank_combo, text="限制连续空行的行数")
+                # 空行下拉框
+                for var_name, tip_text in [
+                    ('merge_remove_blank_lines_var', "删除指定的空行数量"),
+                    ('merge_limit_blank_lines_var', "限制连续空行的行数")]:
+                    var = tk.StringVar(value='-')
+                    self._settings_vars_dict[var_name] = var
+                    combo = ttk.Combobox(f_merge, textvariable=var, width=2, state="readonly", values=['-'] + [str(i) for i in range(1, 11)], font=FONT)
+                    combo.pack(side=tk.LEFT, padx=(5, 0))
+                    ToolTip(combo, text=tip_text)
                 f_merge.pack(anchor='w')
             else:
                 cb = tk.Checkbutton(root, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
@@ -310,6 +305,7 @@ class EpubProcessor:
             item = opf_soup.find('item', id=itemref['idref'])
             if item and item.get('media-type') == 'application/xhtml+xml':
                 href = item['href']
+                if href.lower().endswith('nav.xhtml'): continue
                 # 规范化路径：处理相对路径和URL编码
                 norm_path = (opf_dir / href).resolve()
                 spine_files.append(norm_path)
@@ -327,10 +323,8 @@ class EpubProcessor:
             if entry['href'] in self.excluded_toc_entries:
                 logger.debug(f"跳过排除的目录条目: {entry['href']}")
                 continue
-
             entry_href = entry['href'].split('#')[0]
             entry_file = opf_dir / entry_href
-
             try:
                 start_idx = spine_files.index(entry_file)
             except ValueError:
@@ -357,12 +351,10 @@ class EpubProcessor:
             main_file = spine_files[start_idx]
             main_content = main_file.read_text(encoding='utf-8')
             main_soup = BeautifulSoup(main_content, 'html.parser')
-
             # 合并内容
             for merge_path in spine_files[start_idx+1:end_idx]:
                 merge_content = merge_path.read_text(encoding='utf-8')
                 merge_soup = BeautifulSoup(merge_content, 'html.parser')
-
                 # 转移<body>内容
                 if main_soup.body and merge_soup.body:
                     # 添加双br标签夹hr标签隔开
@@ -378,7 +370,6 @@ class EpubProcessor:
                         if child.name == 'script':  # 跳过脚本标签
                             continue
                         main_soup.body.append(copy.copy(child))
-
                 # 删除已合并文件并从OPF中移除引用
                 merge_path.unlink()
                 merge_href = merge_path.relative_to(opf_dir).as_posix()
@@ -390,18 +381,16 @@ class EpubProcessor:
                         itemref.decompose()
                     # 从manifest中移除item
                     item.decompose()
-
             # 保存合并后的文件
             main_file.write_text(str(main_soup), encoding='utf-8')
-
         # 更新OPF文件
         opf_path.write_text(str(opf_soup), encoding='utf-8')
         logger.info("章节间Xhtml合并 完成")
 
     def process_blank_lines(self, temp_dir):
         """删除空行数量限制连续空行"""
-        remove_blank = self.merge_remove_blank_lines_var.get()
-        limit_blank = self.merge_limit_blank_lines_var.get()
+        remove_blank = self._settings_vars_dict['merge_remove_blank_lines_var'].get()
+        limit_blank = self._settings_vars_dict['merge_limit_blank_lines_var'].get()
         if remove_blank == '-' and limit_blank == '-':
             return
         temp_dir = Path(temp_dir)
