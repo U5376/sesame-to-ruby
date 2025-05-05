@@ -69,6 +69,9 @@ class EpubNCXGenerator:
                 if nav_path.exists():
                     nav_path.unlink()
                     logger.debug(f"已删除 nav 文件: {nav_path}")
+                # 从manifest中移除nav的item
+                nav_item.decompose()
+                logger.debug("已从OPF manifest中移除nav条目")
             # 查找manifest中cover图片item（优先 properties="cover-image" 的item）
             manifest = soup.find('manifest')
             cover_item = None
@@ -96,7 +99,7 @@ class EpubNCXGenerator:
                 new_meta = soup.new_tag('meta', attrs={'name': 'cover', 'content': cover_item['id']})
                 metadata.append(new_meta)
                 logger.debug(f"已添加epub2.0 cover meta: id={cover_item['id']}")
-                opf_path.write_text(str(soup), encoding='utf-8')
+            opf_path.write_text(str(soup), encoding='utf-8')
             logger.success("修改epub版本号并添加cover声明√")
             return True, "修改epub版本号完毕"
         except Exception as e:
