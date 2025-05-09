@@ -520,7 +520,7 @@ class EpubProcessor:
             original_images = []
             temp_dir_path = Path(temp_dir)
             for file in temp_dir_path.rglob('*'):
-                if file.suffix.lower() in ('.png', '.jpg', '.jpeg'):
+                if file.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp'):
                     if file.exists():  # 二次验证文件存在
                         original_images.append(str(file))
                         logger.debug(f"[扫描] 发现图片文件: {file.relative_to(temp_dir_path)}")
@@ -563,6 +563,10 @@ class EpubProcessor:
             deleted_files = 0
             for old_path in original_images:
                 old_file = Path(old_path)
+                old_ext = old_file.suffix.lower()[1:]
+                if old_ext == output_format:
+                    logger.debug(f"[跳过] 格式相同不清理: {old_file.relative_to(temp_dir_path)}")
+                    continue
                 new_path = old_file.with_name(image_mapping[old_file.name])
                 if new_path.exists():
                     try:
@@ -572,7 +576,7 @@ class EpubProcessor:
                     except Exception as e:
                         logger.warning(f"[警告] 删除失败 {old_path}: {str(e)}")
                 else:
-                    logger.error(f"[错误] 新文件未生成: {str(Path(new_path).relative_to(temp_dir))}")
+                    logger.error(f"[错误] 新文件未生成: {str(new_path.relative_to(temp_dir_path))}")
             logger.info(f"共清理 {deleted_files}/{len(original_images)} 个旧图片文件")
             # ===== 6. 更新html内图片引用 =====
             updated_refs = 0
