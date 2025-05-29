@@ -1,0 +1,115 @@
+文件列表
+主程序sesame-to-ruby.py
+epub_ncx_generator.py #生成toc.ncx 转epub2.0 更新opf信息 移除nav.xhtml
+regex_manager.py #管理正则表达式规则和工具提示
+tooltip.py #提供GUI元素的悬浮提示功能
+image_converter.py/exe #处理图片格式转换
+
+
+1. EpubProcessor.__init__（初始化界面）
+   - 功能：创建应用主界面并初始化所有组件
+   - 详细流程：
+     * 创建Tkinter主窗口，设置标题和图标(note.ico)
+     * 初始化RegexManager组件：
+       - 从config.ini加载用户自定义正则规则
+       - 若无配置则创建默认规则(清理body/div/p标签样式等)
+       - 为每个规则添加可编辑的ToolTip说明
+     * 绑定规则保存按钮到主程序保存方法
+     * 初始化批量转换按钮和单文件处理功能
+     * 初始化辅助功能按钮：
+       - 样式收集分析(show_class_list): 扫描EPUB中使用的CSS类
+       - 目录排除(show_exclude_dialog): 设置不合并的章节
+       - 重置设置(reset_app_settings): 恢复默认配置
+     * 加载应用设置(load_app_settings)
+
+2. EpubProcessor.open_file_dialog（文件选择）
+   - 用户选择输入/输出EPUB文件
+
+3. EpubProcessor.process_epub（解压处理）
+   - 解压EPUB到临时目录（zipfile.ZipFile.extractall）
+   - 解析container.xml获取OPF路径（_parse_toc）
+
+4. EpubProcessor.process_opf_and_styles（OPF核心处理）
+   - 功能：处理OPF文件和样式表
+     * 使用BeautifulSoup删除page-progression-direction属性
+     * 清理CSS引用(删除item[media-type="text/css"])
+     * 添加自定义样式表(style.css)到XHTML文件头
+
+5. EpubNCXGenerator.generate_ncx（生成NCX）
+   - 基于NAV构建层级目录（_parse_nav递归解析列表）
+     * _parse_nav: 递归解析NAV结构构建层级
+     * _create_ncx_content: 生成toc.ncx文件内容
+
+6. EpubNCXGenerator.convert_to_epub2（版本转换）
+   - 将EPUB3.0转换为EPUB2.0格式
+     * 修改package声明为version="2.0"
+     * 删除epub3.0的prefix属性
+     * 移除nav.xhtml文件
+
+7. 文件处理阶段（循环处理每个XHTML文件）：
+   a. EpubProcessor.process_ruby（Ruby规范化 | def process_ruby）
+      - 提取<img>标签到Ruby外部（copy.copy处理）
+      - 合并多个<rt>内容（merged_content生成）
+   
+   b. EpubProcessor.apply_regex_rules（正则预处理）
+      - 从RegexManager获取所有已编译的正则规则
+      - 按顺序应用每条规则到文件内容
+      - 处理正则替换错误并记录日志
+   
+   c. EpubProcessor.modify_html（傍点转换）
+      - 转换class指定的<span>为<ruby>（创建rt标签并添加"・"）
+   
+   d. EpubProcessor.post_process_images（图片图片规格化）
+      - 主要div跟P标签规格化成多看交互标签
+      - SVG标签兼容
+      - 暂不处理span跟gaiji标签
+
+   e. EpubProcessor.process_blank_lines（空行处理）
+      - 删除指定数量的空行
+      - 限制连续空行的最大数量
+
+8. EpubProcessor.merge_xhtml_files（章节合并）
+   - 解析OPF文件获取spine顺序和目录结构
+   - 根据目录条目确定合并范围
+   - 主文件保留，合并文件内容转移到主文件
+   - 添加分隔符（双br标签夹hr标签）
+   - 更新OPF文件，移除已合并文件的引用
+   - 支持用户排除特定目录条目不合并
+
+9. EpubProcessor.convert_epub_images（图片转换）
+   - 扫描EPUB中所有图片文件
+   - 使用image_converter.exe转换图片格式
+   - 更新HTML文件中的图片引用
+   - 清理旧图片文件
+   - 更新OPF清单中的媒体类型
+
+10. EpubProcessor.batch_convert_epubs（批量转换）
+    - 选择多个EPUB文件
+    - 为每个文件创建输出目录(output)
+    - 依次处理每个EPUB文件
+    - 保存转换结果到输出目录
+    - 记录转换状态和错误
+
+11. 应用设置管理
+    - 保存设置(save_app_settings)
+      * 保存正则规则到config.ini
+      * 保存应用配置选项
+    - 加载设置(load_app_settings)
+      * 从config.ini读取配置
+      * 恢复界面状态
+    - 重置设置(reset_app_settings)
+      * 恢复默认选项值
+
+12. 辅助功能
+    - 样式收集分析(show_class_list)
+      * 扫描EPUB中使用的CSS类
+      * 显示span和图片的特殊类
+      * 支持查看样式定义详情
+    - 目录排除(show_exclude_dialog)
+      * 解析EPUB目录结构
+      * 提供GUI选择要排除合并的章节
+      * 保存用户选择
+
+13. 最终打包
+    - 重新压缩为EPUB（zipfile.ZipFile写入）
+    - 保留META-INF/container.xml结构
