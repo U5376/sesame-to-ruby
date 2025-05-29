@@ -114,7 +114,8 @@ class EpubProcessor:
         ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n-w 线程数 默认2\n-m WebP压缩等级 1-6 默认6 越大越慢越优")
         f_image.pack(fill=tk.X, anchor='w')
 
-        self.config_file = os.path.join(os.path.dirname(__file__), "config.ini")
+        base_dir = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).parent
+        self.config_file = base_dir / "config.ini"
         self.load_app_settings()
 
         self.regex_manager = RegexManager(root, config_path=self.config_file)
