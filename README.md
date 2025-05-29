@@ -1,41 +1,73 @@
 # EPUB傍点转Ruby工具
+![图片描述](250530.webp)
 
 ## 项目概述
-用于规格化?处理日语EPUB的工具，主要功能是将em-sesame/em-dot样式的傍点转为Ruby标签格式。2.0丰富了更多的功能自动处理
+用于规格化？处理日语EPUB的工具，主要功能是将em-sesame/em-dot样式的傍点转为Ruby标签格式。2.0堆了更多的东西用于自动化处理。
 
 ## 主要功能
-- 傍点转Ruby：将指定class的span标签转换为标准ruby标签
-- 正则预处理：支持自定义正则规则清理HTML标签样式
-- 图片处理：转换图片格式并规范化图片标签 支持webp png jpg
-- 章节合并：根据目录结构合并XHTML文件
-- 批量转换：支持同时处理多个EPUB文件
-- EPUB版本转换：将EPUB3.0转换为EPUB2.0格式
-- 样式管理：清理原有样式并添加自定义CSS
-- 支持删除空行和限制连续空行数量
+- **傍点转Ruby**：将指定class的span标签转换为标准ruby标签
+  - 支持自定义傍点class名称(默认em-sesame|em-dot)
+  - 自动合并多个<rt>内容
+  - 处理gaiji class的特殊图片文字
+- **正则预处理**：支持自定义正则规则清理HTML标签样式
+  - 通过RegexManager管理正则规则
+  - 支持规则保存和加载(config.ini)
+  - 提供规则编辑的ToolTip提示
+- **图片处理**：
+  - 转换图片格式(支持webp/png/jpg)
+  - 规格化图片标签(排除span跟gaiji标签)
+  - 更新OPF清单中的媒体类型
+- **章节合并**：
+  - 根据目录结构合并XHTML文件
+  - 支持排除特定章节
+  - 添加分隔符(双br标签夹hr标签)
+- **批量转换**：支持同时处理多个EPUB文件
+  - 为每个文件创建独立输出目录
+  - 记录转换状态和错误
+- **EPUB版本转换**：将EPUB3.0转换为EPUB2.0格式
+  - 生成NCX目录(toc.ncx)
+  - 移除nav.xhtml
+  - 修改package声明为version="2.0"
+- **样式管理**：
+  - 清理原有样式(item[media-type="text/css"])
+  - 添加自定义CSS(style.css)
+- **空行处理**：
+  - 删除指定数量的空行
+  - 限制连续空行的最大数量
 
 ## 文件结构
 ```
 sesame-to-ruby/
-├── sesame-to-ruby.py      # 主程序 考虑过内部功能某些分出py...不过感觉屎山会出问题 考虑中
+├── sesame-to-ruby.py      # 主程序(GUI界面和主控制流程)
 ├── epub_ncx_generator.py  # NCX生成和EPUB版本转换
-├── regex_manager.py       # 界面正则规则等功能按钮
-├── tooltip.py             # 界面悬浮提示公用函数
-├── image_converter.py     # 图片转换处理 nuitka编译单文件image_converter.exe
-├── style.css              # 会导入的自定义样式表
-└── config.ini             # 会自动生成ini配置文件 可进行保存
+├── regex_manager.py       # 正则规则管理(加载/保存/编辑)
+├── tooltip.py             # GUI元素悬浮提示
+├── image_converter.py     # 图片转换处理(nuitka编译为image_converter.exe)
+├── style.css              # 自定义样式表
+├── config.ini             # 配置文件(自动生成)
 ```
 
 ## 使用说明
-1. 运行主程序：`python sesame-to-ruby.py`
-2. 选择EPUB文件或使用批量转换功能
+1. **运行主程序**：`python sesame-to-ruby.py`
+   - 初始化界面加载图标和配置
+   - 自动加载上次保存的正则规则
+
+2. **选择EPUB文件**：
+   - 单文件处理：选择输入/输出路径
+   - 批量转换：选择多个输入文件和输出目录
+
 3. 根据需要配置转换选项：
-   - 指定傍点class名称(默认em-sesame|em-dot)
-   - 设置图片转换参数
-   - 编辑正则替换规则 需要亲自确认清楚需要哪些正则
+   - **正则规则**：通过界面编辑、添加、删除规则
+   - **图片处理**：设置转换格式和参数
+   - **空行控制**：设置删除空行数量和最大连续空行
+   - **章节合并**：选择要排除的章节
    - 删除空行与限制连续空行：下拉框中选择需要删除的空行数量和允许的最大连续空行数
+
 4. 开始转换并保存结果
 
 ## 执行流程
+参考 逻辑流程 AI生成.txt
+大致上
 1. 解压EPUB到临时目录
 2. 处理OPF文件和样式表
 3. 生成NCX目录(EPUB2.0)
