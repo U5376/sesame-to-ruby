@@ -111,7 +111,7 @@ class EpubProcessor:
         image_check.pack(side=tk.LEFT)
         image_entry = tk.Entry(f_image, textvariable=self.image_params_var, width=30, font=FONT)
         image_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n-w 线程数 默认2")
+        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n-w 线程数 默认2\n-m WebP压缩等级 1-6 默认6 越大越慢越优")
         f_image.pack(fill=tk.X, anchor='w')
 
         self.config_file = os.path.join(os.path.dirname(__file__), "config.ini")
