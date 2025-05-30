@@ -114,7 +114,8 @@ class EpubProcessor:
         ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n-w 线程数 默认2\n-m WebP压缩等级 1-6 默认6 越大越慢越优")
         f_image.pack(fill=tk.X, anchor='w')
 
-        self.config_file = os.path.join(os.path.dirname(__file__), "config.ini")
+        base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
+        self.config_file = base_dir / "config.ini"
         self.load_app_settings()
 
         self.regex_manager = RegexManager(root, config_path=self.config_file)
@@ -263,7 +264,7 @@ class EpubProcessor:
             deleted += 1
         logger.debug(f"已删除 {deleted} 个原 CSS 文件")
         # 5. 添加自定义 style.css 文件
-        base_dir = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).parent
+        base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
         custom_css_src = base_dir / 'style.css'
         if custom_css_src.exists():
             shutil.copy2(custom_css_src, css_target_dir / 'style.css')
@@ -535,7 +536,7 @@ class EpubProcessor:
                 image_mapping[old_file.name] = new_name
                 logger.debug(f"[映射] {old_file.name} → {new_name}")
             # ===== 4. 执行图片转换 =====
-            base_dir = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).parent
+            base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
             converter_path = base_dir / "image_converter.exe"
             if not converter_path.exists():
                 raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
@@ -675,18 +676,25 @@ class EpubProcessor:
             ruby_tag.replace_with(new_ruby_tag)  # 用新的 <ruby> 标签替换原始的 <ruby> 标签
 
     def post_process_images(self, soup):
-        # 合并处理div和p标签 删除img标签内style 如果没有alt则填充空白alt 排除span标签跟class=gaiji的标签
-        for tag in soup.find_all(['div', 'p']):
-            if tag.find('span'):
+        # 合并处理div和p标签处理逻辑 改成遍历所有img标签
+        # 删除img标签内style 如果没有alt则填充空白alt 排除span标签跟class=gaiji的标签
+        for img in soup.find_all('img'):
+            if 'gaiji' in img.get('class', []):
                 continue
-            for img in tag.find_all('img'):
-                if 'gaiji' in img.get('class', []):
-                    continue
-                img.attrs.pop('style', None)
-                img['alt'] = img.get('alt', '')
-                new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
-                new_div.append(img.extract())
-                tag.replace_with(new_div)
+            parent = img.parent
+            if parent.name in ('div', 'p'):
+                if all(
+                    c == img or
+                    (getattr(c, 'name', None) == 'br') or
+                    (isinstance(c, str) and not c.strip())
+                    for c in parent.contents
+                ):
+                    img.attrs.pop('style', None)
+                    img['alt'] = img.get('alt', '')
+                    new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
+                    img.extract()
+                    new_div.append(img)
+                    parent.replace_with(new_div)
 
         # 处理 svg 和 ops:switch
         for tag in soup.find_all(['svg', 'ops:switch']):
@@ -874,40 +882,48 @@ class EpubProcessor:
         config.write(buffer)
         app_settings_content = buffer.getvalue().strip()
         regex_rules_content = self.regex_manager.get_rules_content()
-        with open(self.config_file, 'w', encoding='utf-8', newline='\n') as f:
-            f.write(app_settings_content + "\n\n" + regex_rules_content + "\n")
-        logger.info("设置已保存")
+        try:
+            with open(self.config_file, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(app_settings_content + "\n\n" + regex_rules_content + "\n")
+            logger.info(f"设置已保存到: {self.config_file}")
+        except Exception as e:
+            logger.error(f"保存设置失败: {e}")
 
     def load_app_settings(self):
         """从config.ini加载AppSettings"""
-        if not os.path.exists(self.config_file):
+        if not self.config_file.exists():
+            logger.warning(f"配置文件不存在: {self.config_file}")
             return
-        with open(self.config_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-        # 只提取 [AppSettings] 段
-        app_settings_text = ""
-        in_section = False
-        for line in content.splitlines():
-            if line.strip().startswith("[AppSettings]"):
-                in_section = True
-                app_settings_text += line + "\n"
-                continue
-            if in_section:
-                if line.strip().startswith("[") and not line.strip().startswith("[AppSettings]"):
-                    break
-                app_settings_text += line + "\n"
-        if not app_settings_text.strip():
-            return
-        config = configparser.ConfigParser()
-        config.read_string(app_settings_text)
-        if 'AppSettings' in config:
-            for name, var in self._settings_vars_dict.items():
-                if name in config['AppSettings']:
-                    # 判断类型
-                    if isinstance(var, tk.BooleanVar):
-                        var.set(config['AppSettings'].getboolean(name))
-                    else:
-                        var.set(config['AppSettings'][name])
+        try:
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # 只提取 [AppSettings] 段
+            app_settings_text = ""
+            in_section = False
+            for line in content.splitlines():
+                if line.strip().startswith("[AppSettings]"):
+                    in_section = True
+                    app_settings_text += line + "\n"
+                    continue
+                if in_section:
+                    if line.strip().startswith("[") and not line.strip().startswith("[AppSettings]"):
+                        break
+                    app_settings_text += line + "\n"
+            if not app_settings_text.strip():
+                return
+            config = configparser.ConfigParser()
+            config.read_string(app_settings_text)
+            if 'AppSettings' in config:
+                for name, var in self._settings_vars_dict.items():
+                    if name in config['AppSettings']:
+                        # 判断类型
+                        if isinstance(var, tk.BooleanVar):
+                            var.set(config['AppSettings'].getboolean(name))
+                        else:
+                            var.set(config['AppSettings'][name])
+            logger.info(f"设置已加载: {self.config_file}")
+        except Exception as e:
+            logger.error(f"加载设置失败: {e}")
 
     def reset_app_settings(self):
         """重置所有设置为控件默认值"""
