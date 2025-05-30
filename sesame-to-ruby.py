@@ -676,18 +676,25 @@ class EpubProcessor:
             ruby_tag.replace_with(new_ruby_tag)  # 用新的 <ruby> 标签替换原始的 <ruby> 标签
 
     def post_process_images(self, soup):
-        # 合并处理div和p标签 删除img标签内style 如果没有alt则填充空白alt 排除span标签跟class=gaiji的标签
-        for tag in soup.find_all(['div', 'p']):
-            if tag.find('span'):
+        # 合并处理div和p标签处理逻辑 改成遍历所有img标签
+        # 删除img标签内style 如果没有alt则填充空白alt 排除span标签跟class=gaiji的标签
+        for img in soup.find_all('img'):
+            if 'gaiji' in img.get('class', []):
                 continue
-            for img in tag.find_all('img'):
-                if 'gaiji' in img.get('class', []):
-                    continue
-                img.attrs.pop('style', None)
-                img['alt'] = img.get('alt', '')
-                new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
-                new_div.append(img.extract())
-                tag.replace_with(new_div)
+            parent = img.parent
+            if parent.name in ('div', 'p'):
+                if all(
+                    c == img or
+                    (getattr(c, 'name', None) == 'br') or
+                    (isinstance(c, str) and not c.strip())
+                    for c in parent.contents
+                ):
+                    img.attrs.pop('style', None)
+                    img['alt'] = img.get('alt', '')
+                    new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
+                    img.extract()
+                    new_div.append(img)
+                    parent.replace_with(new_div)
 
         # 处理 svg 和 ops:switch
         for tag in soup.find_all(['svg', 'ops:switch']):
