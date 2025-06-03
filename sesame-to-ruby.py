@@ -540,22 +540,22 @@ class EpubProcessor:
             converter_path = base_dir / "image_converter.exe"
             if not converter_path.exists():
                 raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
-            # 生成绝对路径列表文件
             with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as list_file:
                 list_file.write('\n'.join(original_images))
                 list_path = list_file.name
-                logger.debug(f"[转换] 生成临时列表文件: {list_path}")
+            logger.debug(f"[转换] 生成临时列表文件: {list_path}")
+            cmd = [str(converter_path), "-i", f"@{list_path}", *params]
             try:
-                # 执行转换命令
-                cmd = [str(converter_path), "-i", f"@{list_path}", *params]
                 logger.debug("[转换] 执行命令: " + ' '.join(cmd))
-                result = subprocess.run(cmd, cwd=temp_dir, capture_output=True, text=True, check=True)
-                logger.debug("[转换] 输出日志:\n" + result.stdout)
-                match = re.search(r"成功\s*(\d+)/(\d+)", result.stdout)
-                success, total = match.groups() if match else ("0", "0")
+                result = subprocess.run(cmd, cwd=temp_dir, capture_output=True, check=True, encoding='utf-8', errors='replace')
+                out = result.stdout or ""
+                logger.debug("[转换] 输出日志:\n" + out)
+                m = re.search(r"成功\s*(\d+)/(\d+)", out)
+                success, total = m.groups() if m else ("0", "0")
                 logger.success(f"图片转换成功: {success}/{total}")
             except subprocess.CalledProcessError as e:
-                logger.error("[错误] 转换失败:\n" + e.stderr)
+                err = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or "")
+                logger.error(f"[错误] 转换失败:\n{err}")
                 raise
             finally:
                 os.remove(list_path)
