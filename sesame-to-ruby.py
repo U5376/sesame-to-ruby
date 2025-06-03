@@ -86,14 +86,21 @@ class EpubProcessor:
                 cb = tk.Checkbutton(f_merge, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
                 cb.pack(side=tk.LEFT)
                 ToolTip(cb, tip)
+                # 分隔符下拉框
+                self.merge_separator_var = tk.StringVar(value='hr+br')
+                self._settings_vars_dict['merge_separator_var'] = self.merge_separator_var
+                separator_combo = ttk.Combobox(f_merge, textvariable=self.merge_separator_var, width=5, state="readonly", values=['hr+br'] + [f'{i}br' for i in range(2, 10)], font=FONT)
+                separator_combo.pack(side=tk.LEFT)
+                ToolTip(separator_combo, text="章节合并时插入的分隔符样式(会受到两个空行下拉框的影响)")
                 # 空行下拉框
-                for var_name, tip_text in [
-                    ('merge_remove_blank_lines_var', "删除指定的空行数量"),
-                    ('merge_limit_blank_lines_var', "限制连续空行的行数")]:
+                for idx, (blank_var, tip_text) in enumerate([
+                    ('merge_remove_blank_lines_var', "删除指定的空行数量(空行处理不受复选框影响)"),
+                    ('merge_limit_blank_lines_var', "限制连续空行的行数")]):
                     var = tk.StringVar(value='-')
-                    self._settings_vars_dict[var_name] = var
-                    combo = ttk.Combobox(f_merge, textvariable=var, width=2, state="readonly", values=['-'] + [str(i) for i in range(1, 11)], font=FONT)
-                    combo.pack(side=tk.LEFT, padx=(5, 0))
+                    self._settings_vars_dict[blank_var] = var
+                    combo = ttk.Combobox(f_merge, textvariable=var, width=2, state="readonly", values=['-'] + [str(i) for i in range(1, 10)], font=FONT)
+                    # 与分隔符下拉框的间隔跟两个空行下拉框的间隔
+                    combo.pack(side=tk.LEFT, padx=(13 if idx == 0 else 3, 0))
                     ToolTip(combo, text=tip_text)
                 f_merge.pack(anchor='w')
             else:
@@ -358,13 +365,24 @@ class EpubProcessor:
                 merge_soup = BeautifulSoup(merge_content, 'html.parser')
                 # 转移<body>内容
                 if main_soup.body and merge_soup.body:
-                    # 添加双br标签夹hr标签隔开
+                    # 分隔样式
+                    sep_style = self._settings_vars_dict.get('merge_separator_var', None)
+                    sep_val = sep_style.get() if sep_style else 'hr+br'
                     def add_separator(soup, parent):
-                        for tag in ['p', 'hr', 'p']:
-                            element = soup.new_tag(tag)
-                            if tag == 'p':
-                                element.append(soup.new_tag('br'))
-                            parent.extend([element, '\n'])
+                        if sep_val == 'hr+br':
+                            # <p><br/></p><hr/><p><br/></p>
+                            for tag in ['p', 'hr', 'p']:
+                                element = soup.new_tag(tag)
+                                if tag == 'p':
+                                    element.append(soup.new_tag('br'))
+                                parent.extend([element, '\n'])
+                        else:
+                            # <p><br/></p> * N
+                            n = int(sep_val[0]) if sep_val.endswith('br') and sep_val[0].isdigit() else 2
+                            for _ in range(n):
+                                p = soup.new_tag('p')
+                                p.append(soup.new_tag('br'))
+                                parent.extend([p, '\n'])
                     add_separator(main_soup, main_soup.body)
                     # 复制合并文件的内容
                     for child in merge_soup.body.children:
