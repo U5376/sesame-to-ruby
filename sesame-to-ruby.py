@@ -674,24 +674,30 @@ class EpubProcessor:
             logger.info("图片处理流程结束")
 
     def process_ruby(self, soup):
-        ruby_tags = soup.find_all('ruby')  # 查找所有的 <ruby> 标签
-        for ruby_tag in ruby_tags:
-            img_tags = ruby_tag.find_all('img')  # 查找所有的 <img> 标签
-            for img_tag in img_tags:
-                copy_tag = copy.copy(img_tag)  # 复制图片标签
-                ruby_tag.insert_before(copy_tag)  # 将复制的图片标签插入到 ruby 标签之前
-                img_tag.extract()  # 删除原始图片标签
-            rt_tags = ruby_tag.find_all('rt')  # 查找所有的 <rt> 标签
-            original_content = ruby_tag.get_text()  # 获取原始内容（不包含 <rt> 标签）
-            merged_content = ''.join(rt_tag.get_text(strip=True)for rt_tag in rt_tags if rt_tag.get_text(strip=True)) # 合并 <rt> 标签 忽略所有的嵌套标签
-            for rt_tag in rt_tags:
-                rt_tag.extract()  # 删除所有的 <rt> 标签
-            rt_tag = soup.new_tag('rt')  # 创建一个新的 <rt> 标签
-            rt_tag.string = merged_content  # 设置新的 <rt> 标签的内容
-            new_ruby_tag = soup.new_tag('ruby')  # 创建一个新的 <ruby> 标签
-            new_ruby_tag.string = original_content.replace('\n', '')  # 设置新的 <ruby> 标签的内容，并删除换行符
-            new_ruby_tag.append(rt_tag)  # 将新的 <rt> 标签添加到新的 <ruby> 标签中
-            ruby_tag.replace_with(new_ruby_tag)  # 用新的 <ruby> 标签替换原始的 <ruby> 标签
+        for ruby_tag in soup.find_all('ruby'):  # 遍历所有ruby标签
+            img_tags = ruby_tag.find_all('img')  # 查找ruby内所有img标签
+            rt_tags = ruby_tag.find_all('rt')  # 查找ruby内所有rt标签
+            merged_content = ''.join(rt.get_text(strip=True) for rt in rt_tags if rt.get_text(strip=True)) # 合并 <rt> 标签 忽略所有的嵌套标签
+            for rt in rt_tags:
+                rt.extract()  # 删除残留的原rt标签
+            if img_tags:  # ruby内含图片的处理
+                for child in list(ruby_tag.contents):  # 遍历ruby内所有子节点
+                    if getattr(child, 'name', None) != 'rt':  # 除rt标签内容
+                        ruby_tag.insert_before(child.extract() if hasattr(child, 'extract') else child)  # 搬到ruby前面
+                new_ruby = soup.new_tag('ruby')  # 创建新ruby标签
+                new_ruby.string = '\u00A0'  # 空占位符 预防空标签不显示内容
+                rt = soup.new_tag('rt')  # 创建新rt标签
+                rt.string = merged_content if merged_content else '\u00A0'  # rt内容或空占位
+                new_ruby.append(rt)  # 添加rt到ruby
+                ruby_tag.replace_with(new_ruby)  # 用新ruby替换原ruby
+            else:  # 正常ruby标签处理
+                original_content = ruby_tag.get_text().replace('\n', '')  # 获取原内容并去除换行
+                new_ruby = soup.new_tag('ruby')  # 创建新ruby标签
+                new_ruby.string = original_content  # 设置ruby正文
+                rt = soup.new_tag('rt')  # 创建新rt标签
+                rt.string = merged_content  # 设置rt内容
+                new_ruby.append(rt)  # 添加rt到ruby
+                ruby_tag.replace_with(new_ruby)  # 用新ruby替换原ruby
 
     def post_process_images(self, soup):
         # 合并处理div和p标签处理逻辑 改成遍历所有img标签
