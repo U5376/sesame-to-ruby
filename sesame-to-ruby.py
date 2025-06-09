@@ -284,8 +284,8 @@ class EpubProcessor:
             if file_path.suffix.lower() not in ('.xhtml', '.html'):
                 continue
             soup = BeautifulSoup(file_path.read_text(encoding='utf-8'), 'html.parser')
-            for tag in soup.select('style, link[rel="stylesheet"]'):
-                tag.decompose()
+            # 清理样式、viewport、js脚本
+            [tag.decompose() for tag in soup.select('style, link[rel="stylesheet"], meta[name="viewport"], script')]
             css_rel_xhtml = os.path.relpath(css_target_dir / 'style.css', file_path.parent).replace('\\', '/')
             if head := soup.find('head'):
                 head.append(soup.new_tag('link', rel='stylesheet', type='text/css', href=css_rel_xhtml))
@@ -662,7 +662,7 @@ class EpubProcessor:
                         f.truncate()
                         logger.success("更新图片OPF清单 完成")
                     else:
-                        logger.info("[OPF] 无需修改")
+                        logger.info("图片OPF清单 无需修改")
             except Exception as e:
                 logger.error(f"[严重错误] OPF处理失败: {str(e)}")
                 raise

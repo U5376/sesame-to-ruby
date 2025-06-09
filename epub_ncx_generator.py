@@ -17,8 +17,10 @@ class EpubNCXGenerator:
             ncx_path = opf_dir / 'toc.ncx'
             nav_path = EpubNCXGenerator._find_nav_path(opf_path)
             if ncx_path.exists():
-                logger.info("toc.ncx已存在，跳过生成")
-                return True, "toc.ncx已存在，跳过生成"
+                logger.info("toc.ncx已存在，已确保OPF引用和spine属性")
+                # 仍然需要确保OPF引用和spine属性正确
+                EpubNCXGenerator._update_opf_reference(opf_path)
+                return True, "toc.ncx已存在，已确保OPF引用和spine属性"
             if not nav_path:
                 logger.error("未找到有效的NAV文件")
                 return False, "未找到有效的NAV文件"
@@ -69,6 +71,20 @@ class EpubNCXGenerator:
                 if nav_path.exists():
                     nav_path.unlink()
                     logger.debug(f"已删除 nav 文件: {nav_path}")
+                # 寻找epub根目录（包含mimetype文件的目录）
+                epub_root = opf_path.parent
+                for parent in opf_path.parents:
+                    if (parent / 'mimetype').exists():
+                        epub_root = parent
+                        break
+                # 递归删除epub根目录下所有 .bw 文件
+                for bw_file in epub_root.rglob('*.bw'):
+                    bw_file.unlink()
+                    logger.debug(f"已删除 .bw 文件: {bw_file}")
+                # 递归删除epub根目录下所有 .js 文件
+                for js_file in epub_root.rglob('*.js'):
+                    js_file.unlink()
+                    logger.debug(f"已删除 js 文件: {js_file}")
                 # 从manifest中移除nav的item
                 nav_item.decompose()
                 logger.debug("已从OPF manifest中移除nav条目")
@@ -125,7 +141,6 @@ class EpubNCXGenerator:
         if not nav_path.exists():
             logger.warning(f"nav导航文件不存在 {nav_path}")
             return None
-        
         return nav_path
 
     @staticmethod
