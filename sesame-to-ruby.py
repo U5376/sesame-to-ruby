@@ -285,7 +285,7 @@ class EpubProcessor:
                 continue
             soup = BeautifulSoup(file_path.read_text(encoding='utf-8'), 'html.parser')
             # 清理样式、viewport、js脚本
-            [tag.decompose() for tag in soup.select('style, link[rel="stylesheet"], meta[name="viewport"], script')]
+            [tag.decompose() for tag in soup.select('style, link[rel="stylesheet"], meta, script')]
             css_rel_xhtml = os.path.relpath(css_target_dir / 'style.css', file_path.parent).replace('\\', '/')
             if head := soup.find('head'):
                 head.append(soup.new_tag('link', rel='stylesheet', type='text/css', href=css_rel_xhtml))
