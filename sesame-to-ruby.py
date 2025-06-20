@@ -675,6 +675,8 @@ class EpubProcessor:
 
     def process_ruby(self, soup):
         for ruby_tag in soup.find_all('ruby'):  # 遍历所有ruby标签
+            rt_tags = ruby_tag.find_all('rt')
+            if rt_tags and rt_tags[0].get_text(strip=True).startswith('・'):continue  # 跳过rt标签后以・开头则跳过的ruby
             img_tags = ruby_tag.find_all('img')  # 查找ruby内所有img标签
             rt_tags = ruby_tag.find_all('rt')  # 查找ruby内所有rt标签
             merged_content = ''.join(rt.get_text(strip=True) for rt in rt_tags if rt.get_text(strip=True)) # 合并 <rt> 标签 忽略所有的嵌套标签
