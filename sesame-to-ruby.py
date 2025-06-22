@@ -5,21 +5,22 @@ import copy
 import zipfile
 import tempfile
 import subprocess
-import xml.etree.ElementTree as ET
+import shutil
+import lxml.etree as ET
+from pathlib import Path
+from urllib.parse import unquote
+import configparser
+
 import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from tkinterdnd2 import DND_FILES, TkinterDnD
 from bs4 import BeautifulSoup
-from epub_ncx_generator import EpubNCXGenerator
-from regex_manager import RegexManager
-from tkinter import ttk, filedialog, messagebox, Entry, Label, Button, END
+from loguru import logger
+
 from Image import icon_base64
 from tooltip import ToolTip
-import warnings
-import shutil
-import lxml.etree
-from urllib.parse import unquote
-from loguru import logger
-from pathlib import Path
-import configparser
+from epub_ncx_generator import EpubNCXGenerator
+from regex_manager import RegexManager
 
 class EpubProcessor:
     def __init__(self, root):
@@ -128,6 +129,10 @@ class EpubProcessor:
         self.regex_manager = RegexManager(root, config_path=self.config_file)
         self._bind_regex_save_button()
 
+        # 拖拽支持
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self._on_drop_epub)
+
     def _bind_regex_save_button(self):
         """将正则管理器的保存按钮绑定为主程序保存方法"""
         for child in self.regex_manager.frame.winfo_children():
@@ -136,6 +141,13 @@ class EpubProcessor:
                 for btn in btns:
                     if btn.cget("text") == "保存设置":
                         btn.config(command=self.save_app_settings)
+
+    def _on_drop_epub(self, event):
+        # 只处理epub拖拽加载
+        files = self.root.tk.splitlist(event.data)
+        self.epub_path = next((f for f in files if f.lower().endswith('.epub')), None)
+        if self.epub_path:
+            logger.info(f"拖拽载入epub: {self.epub_path}")
 
     def open_file_dialog(self):
         self.epub_path = filedialog.askopenfilename(filetypes=[('EPUB文件', '*.epub')])
@@ -968,7 +980,7 @@ class EpubProcessor:
 
 if __name__ == "__main__":
     logger.info("程序初始化")
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
     processor = EpubProcessor(root)
     logger.info("进入主循环")
     root.mainloop()

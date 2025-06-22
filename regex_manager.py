@@ -1,9 +1,9 @@
 import re
+import sys
 from pathlib import Path
 import tkinter as tk
 from loguru import logger
 from tooltip import ToolTip # tooltip.py
-import sys
 
 class RegexManager:
     def __init__(self, root, config_path="config.ini", log_level_var=None):

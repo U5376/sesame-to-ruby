@@ -6,7 +6,7 @@ on:
 jobs:
   build:
 
-    runs-on: windows-2019
+    runs-on: windows-2022
 
     steps:
 
@@ -24,6 +24,7 @@ jobs:
         pip install beautifulsoup4
         pip install loguru
         pip install lxml
+        pip install tkinterdnd2
 
     - name: 编译EXE文件
       run: |
@@ -36,5 +37,5 @@ jobs:
     - name: 上传EXE文件
       uses: actions/upload-artifact@v4
       with:
-        name: sesame-to-ruby.exe
+        name: sesame-to-ruby
         path: ./sesame-to-ruby.exe
