@@ -6,7 +6,6 @@ import zipfile
 import tempfile
 import subprocess
 import shutil
-import lxml.etree as ET
 from pathlib import Path
 from urllib.parse import unquote
 import configparser
@@ -14,7 +13,7 @@ import configparser
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup # 需要lxml库 会优先自动使用
 from loguru import logger
 
 from Image import icon_base64
@@ -481,19 +480,15 @@ class EpubProcessor:
             file_path.write_text(str(soup), encoding='utf-8')
 
     def _get_opf_path(self, temp_dir):
-        """解析container.xml获取opf文件路径"""
+        """解析container.xml 准确获取opf名字路径"""
         container_path = Path(temp_dir) / 'META-INF' / 'container.xml'
         with container_path.open('r', encoding='utf-8') as f:
             container_content = f.read()
-        root = ET.fromstring(container_content)
-        opf_path = None
-        for rootfile in root.findall('.//{*}rootfile'):
-            opf_path = rootfile.get('full-path')
-            if opf_path:
-                break
-        if not opf_path:
+        soup = BeautifulSoup(container_content, 'xml')
+        rootfile = soup.find('rootfile')
+        if not rootfile or not rootfile.get('full-path'):
             raise ValueError("未找到 .opf 文件路径")
-        return Path(temp_dir) / opf_path
+        return Path(temp_dir) / rootfile['full-path']
 
     def _parse_toc(self, opf_soup, opf_path):
         """解析目录结构，兼容EPUB 2.0(NCX)和EPUB 3.0(NAV)"""
