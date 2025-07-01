@@ -1,19 +1,43 @@
+import os
 import re
 import sys
 from pathlib import Path
 import tkinter as tk
+from tkinter import ttk, messagebox
 from loguru import logger
 from tooltip import ToolTip # tooltip.py
 
 class RegexManager:
-    def __init__(self, root, config_path="config.ini", log_level_var=None):
+    def __init__(self, root, config_path="config.ini", log_level_var=None, parent=None):
         self.root = root
         self.config_file = Path(config_path)
         self.regex_entries = []
         self.tooltips = []
         self.log_level_var = log_level_var  # 新增
+        self.ini_files = []  # 所有ini文件列表
+        self.selected_ini = tk.StringVar(value=str(self.config_file))  # 当前选中的ini文件
+        self.parent = parent  # 主程序对象
         self.init_ui()
         self.load_config()
+
+    def _init_ini_files(self):
+        """初始化ini文件列表并更新下拉框"""
+        base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
+        ini_paths = sorted([p for p in base_dir.glob('*.ini')])
+        config_ini = base_dir / 'config.ini'
+        if config_ini in ini_paths: ini_paths.remove(config_ini), ini_paths.insert(0, config_ini)
+        if not ini_paths: ini_paths = [config_ini]
+        self.ini_files, self.ini_names = [str(p) for p in ini_paths], [p.name for p in ini_paths]
+        if not hasattr(self, '_ini_inited'):
+            self.selected_ini.set(self.config_file.name)
+            self.ini_menu['values'], self.ini_menu['state'] = self.ini_names, 'readonly'
+            self.ini_menu.set(self.config_file.name)
+            self._ini_inited = True
+        elif self.config_file.name in self.ini_names:
+            self.selected_ini.set(self.config_file.name), self.ini_menu.set(self.config_file.name)
+        else:
+            self.selected_ini.set(self.ini_names[0]), self.ini_menu.set(self.ini_names[0])
+            self.config_file = Path(self.ini_files[0])
 
     def init_ui(self):
         """初始化界面组件"""
@@ -24,13 +48,18 @@ class RegexManager:
         buttons = [
             ("添加正则", self.add_entry),
             ("保存设置", self.save_config),
-            ("加载默认正则", self.reset_to_default)
         ]
         for text, cmd in buttons:
             tk.Button(btn_frame, text=text, command=cmd, font=("宋体", 12)).pack(side=tk.LEFT, padx=2)
 
-        # 添加日志级别下拉框（原始UI：放在btn_frame里，不用log_level_var参数）
-        from tkinter import ttk
+        # 配置文件下拉框，限制宽度为20
+        ini_menu = ttk.Combobox(btn_frame, textvariable=self.selected_ini, values=[], state="readonly", font=("宋体", 12), width=11)
+        ini_menu.pack(side=tk.LEFT, padx=2)
+        ini_menu.bind("<<ComboboxSelected>>", self._on_ini_selected)
+        self.ini_menu = ini_menu
+        self._init_ini_files()
+
+        # 日志级别下拉框
         log_level_var = tk.StringVar(btn_frame)
         log_level_var.set("info")  # 默认值
         log_levels = ["info", "debug"]
@@ -39,6 +68,10 @@ class RegexManager:
         log_level_menu.bind("<<ComboboxSelected>>", lambda e: self.set_log_level(log_level_var.get()))
         # 初始化时设置日志级别
         self.set_log_level("info")
+
+        self._add_ini_menu_tooltip()
+        self._add_ini_menu_manage()
+
 
     def set_log_level(self, level):
         """设置日志级别"""
@@ -50,47 +83,40 @@ class RegexManager:
         """空实现，主程序会重绑定按钮为实际保存方法"""
         pass
 
-    def load_config(self):
-        """加载配置"""
-        if self.config_file.exists():
-            self._load_from_ini()
-        else:
-            self._create_default_rules()
-            self.save_config()
+    def load_config(self, config_path=None):
+        if config_path:
+            self.config_file = Path(config_path)
+        # 清空UI（防止重复加载）
+        [entry[2].destroy() for entry in getattr(self, 'regex_entries', []) if hasattr(entry[2], 'destroy')]
+        self.regex_entries, self.tooltips = [], []
+        self._load_from_ini() if self.config_file.exists() else (self._create_default_rules(), self.save_config())
+        self._init_ini_files()
+        # 保持下拉框选中项同步
+        if hasattr(self, 'ini_names') and hasattr(self, 'ini_menu'):
+            try:
+                idx = self.ini_files.index(str(self.config_file))
+                [func(self.ini_names[idx]) for func in (self.selected_ini.set, self.ini_menu.set)]
+            except Exception:
+                pass
 
     def _load_from_ini(self):
         """ini配置加载"""
         with open(self.config_file, 'r', encoding='utf-8') as f:
-            current_rule = {}
-            current_key = None
-            for line in f:
-                line = line.rstrip('\n')  # 保留行尾空白
-                # 检测节头
-                if line.strip() == "[RegexRules]":
-                    continue
-                # 检测规则头 (rule_数字)
+            current_rule, current_key = { }, None
+            lines = [line.rstrip('\n') for line in f]
+            for line in lines:
+                if line.strip() == "[RegexRules]": continue
                 if line.startswith('rule_'):
-                    if current_rule:
-                        self._add_rule_from_dict(current_rule)
-                    current_rule = {}
-                    current_key = None
+                    current_rule and self._add_rule_from_dict(current_rule)
+                    current_rule, current_key = {}, None
                     continue
-                # 空行跳过
-                if not line.strip():
-                    continue
-                # 处理键值对
+                if not line.strip(): continue
                 if '=' in line:
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    current_rule[key] = value
-                    current_key = key
+                    key, value = map(str.strip, line.split('=', 1))
+                    current_rule[key], current_key = value, key
                 elif current_key and (line.startswith(' ') or line.startswith('\t')):
-                    # 续行内容（追加到当前键值）
                     current_rule[current_key] += '\n' + line.lstrip()
-            # 提交最后一个规则
-            if current_rule:
-                self._add_rule_from_dict(current_rule)
+            current_rule and self._add_rule_from_dict(current_rule)
 
     def _add_rule_from_dict(self, rule_dict):
         """从字典添加规则"""
@@ -268,3 +294,125 @@ class RegexManager:
             for entry in self.regex_entries
             if entry[0].get().strip()
         ]
+
+    def update_ini_files(self):
+        """刷新ini列表"""
+        ini = str(self.config_file)
+        self.ini_files = [ini] + [str(p) for p in Path('.').glob('*.ini') if str(p) != ini]
+        self.ini_menu['values'] = self.ini_files
+        self.ini_menu.set(ini)
+
+    def _on_ini_selected(self, event=None):
+        """ini列表切换配置刷新"""
+        sel = self.selected_ini.get()
+        if hasattr(self, 'ini_names') and sel in self.ini_names:
+            idx = self.ini_names.index(sel)
+            self.config_file = Path(self.ini_files[idx])
+            if self.parent: self.parent.config_file = self.config_file
+            self.selected_ini.set(self.ini_names[idx])
+            self.ini_menu.set(self.ini_names[idx])
+            self.load_config(str(self.config_file))
+            if self.parent: self.parent.load_app_settings()
+        else:
+            self._init_ini_files()
+            self.selected_ini.set(self.ini_names[0])
+            self.ini_menu.set(self.ini_names[0])
+            if self.parent:
+                self.parent.config_file = Path(self.ini_files[0])
+                self.parent.load_app_settings()
+
+    def _add_ini_menu_tooltip(self):
+        """下拉框悬浮提示配置名"""
+        def show_tip(event):
+            hide_tip(event)
+            idx = self.ini_menu.current()
+            name = self.ini_names[idx] if 0 <= idx < len(self.ini_names) else self.selected_ini.get()
+            x, y = self.ini_menu.winfo_rootx() + 30, self.ini_menu.winfo_rooty() + self.ini_menu.winfo_height() + 5
+            self._ini_tip = tk.Toplevel(self.ini_menu)
+            self._ini_tip.overrideredirect(True)
+            self._ini_tip.geometry(f"+{x}+{y}")
+            tk.Label(self._ini_tip, text=name, bg="#FFFFE0", relief="solid", borderwidth=1, font=("宋体", 10), wraplength=400, justify="left").pack(padx=5, pady=3)
+        def hide_tip(event):
+            getattr(self, '_ini_tip', None) and self._ini_tip.destroy()
+            self._ini_tip = None
+        [self.ini_menu.bind(ev, show_tip) for ev in ("<Enter>", "<Motion>")]
+        self.ini_menu.bind("<Leave>", hide_tip)
+
+    def _add_ini_menu_manage(self):
+        self.ini_menu.bind("<Button-3>", lambda e: self._show_ini_manage_window()) #ini下拉框添加右键管理菜单
+
+    def _show_ini_manage_window(self):
+        """ini配置文件管理窗口"""
+        win = tk.Toplevel(self.root)
+        win.title("配置文件管理")
+        win.geometry(f"450x300+{self.root.winfo_x()+200}+{self.root.winfo_y()+150}")
+        frame = ttk.Frame(win); frame.pack(fill="both", expand=True, padx=8, pady=8)
+        tree = ttk.Treeview(frame, columns=("name", "path"), show="headings")
+        [tree.heading(c, text=t) for c, t in zip(("name", "path"), ("文件名", "完整路径"))]
+        [tree.column(c, width=w) for c, w in zip(("name", "path"), (120, 220))]
+        [tree.insert("", "end", iid=i, values=(n, p)) for i, (n, p) in enumerate(zip(self.ini_names, self.ini_files))]
+        tree.pack(fill="both", expand=True, side="left")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set); vsb.pack(side="right", fill="y")
+        def on_double_click(event):
+            region, col, row = tree.identify("region", event.x, event.y), tree.identify_column(event.x), tree.identify_row(event.y)
+            if region != "cell" or col != "#1" or not row: return
+            x, y, width, height = tree.bbox(row, col)
+            old_name, old_path = tree.item(row, "values")
+            entry = tk.Entry(tree); entry.place(x=x, y=y, width=width, height=height)
+            entry.insert(0, old_name); entry.focus_set()
+            def save_edit(event=None):
+                new_name = entry.get().strip()
+                if not new_name or new_name == old_name: entry.destroy(); return
+                new_path = str(Path(old_path).parent / new_name)
+                try:
+                    os.rename(old_path, new_path)
+                    tree.item(row, values=(new_name, new_path))
+                    self._init_ini_files(); self.load_config(str(new_path))
+                    self.ini_menu['values'] = self.ini_names
+                    self.ini_menu.set(new_name); self.selected_ini.set(new_name)
+                except Exception as e:
+                    messagebox.showerror("重命名失败", str(e))
+                entry.destroy()
+            entry.bind("<Return>", save_edit)
+            entry.bind("<FocusOut>", lambda e: entry.destroy())
+        tree.bind("<Double-1>", on_double_click)
+        menu = tk.Menu(tree, tearoff=0)
+        def copy_config():
+            sel = tree.selection()
+            if not sel: return
+            iid = sel[0]
+            old_name, old_path = tree.item(iid, "values")
+            base = Path(old_path).parent
+            for i in range(1, 100):
+                new_name = f"{Path(old_name).stem}{i}{Path(old_name).suffix}"
+                new_path = base / new_name
+                if not new_path.exists(): break
+            try:
+                import shutil
+                shutil.copy2(old_path, new_path)
+                self._init_ini_files(); self.load_config(str(new_path))
+                self.ini_menu['values'] = self.ini_names
+                self.ini_menu.set(new_name); self.selected_ini.set(new_name)
+                tree.delete(*tree.get_children())
+                [tree.insert("", "end", iid=i, values=(n, p)) for i, (n, p) in enumerate(zip(self.ini_names, self.ini_files))]
+                [tree.selection_set(iid), tree.see(iid)] if tree.item(iid, "values")[0] == new_name else None
+            except Exception as e:
+                messagebox.showerror("复制失败", str(e))
+        menu.add_command(label="复制为新配置", command=copy_config)
+        def delete_config():
+            sel = tree.selection()
+            if not sel: return
+            iid = sel[0]
+            name, path = tree.item(iid, "values")
+            if messagebox.askyesno("确认删除", f"确定要删除 {name} 吗？"):
+                try:
+                    os.remove(path)
+                    tree.delete(iid)
+                    self._init_ini_files(); self.load_config()
+                    self.ini_menu['values'] = self.ini_names
+                    self.ini_menu.set(self.config_file.name); self.selected_ini.set(self.config_file.name)
+                except Exception as e:
+                    messagebox.showerror("删除失败", str(e))
+        menu.add_command(label="删除配置", command=delete_config)
+        tree.bind("<Button-3>", lambda event: (tree.selection_set(tree.identify_row(event.y)), menu.post(event.x_root, event.y_root)) if tree.identify_row(event.y) else None)
