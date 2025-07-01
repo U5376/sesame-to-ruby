@@ -234,7 +234,8 @@ class EpubNCXGenerator:
         """从OPF获取唯一标识符"""
         with open(opf_path, 'r', encoding='utf-8') as f:
             opf_soup = BeautifulSoup(f.read(), 'xml')
-        return opf_soup.find('dc:identifier').text or f'urn:uuid:{uuid.uuid4()}'
+        id_tag = opf_soup.find('dc:identifier')
+        return id_tag.text.strip() if id_tag and id_tag.text else f'urn:uuid:{uuid.uuid4()}'
 
     @staticmethod
     def _update_opf_reference(opf_path):
