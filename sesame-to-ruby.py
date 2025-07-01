@@ -40,17 +40,22 @@ class EpubProcessor:
 
         # 按钮配置：(文本, 命令, grid(row, col), tooltip)
         btn_cfgs = [
-            ('读取epub', self.open_file_dialog, (0, 0), "加载单个epub文件"),
+            ('读取epub', self.open_file_dialog, (0, 0), "加载单个epub文件\n支持拖拽epub进UI窗口"),
             ('开始转换', self.start_conversion, (0, 1), "转换加载的单个epub文件"),
-            ('批量转换', self.batch_convert_epubs, (0, 2), "选择多个epub后立即批量转换\n在epub所在目录下创建output文件夹\n转换后的epub放入output，文件名为原epub名"),
+            ('批量转换', self.batch_convert_epubs, (0, 2), "批量转换\n支持epub拖拽到按钮\n原名文件保存至output文件夹"),
             ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
-            ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目"),
+            ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目\n批量也能排除指定的章节名"),
             ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态"),
         ]
         for text, cmd, (row, col), tip in btn_cfgs:
             btn = tk.Button(main_frame, text=text, command=cmd, font=FONT)
             btn.grid(row=row, column=col, padx=5, pady=2, sticky='w')
             ToolTip(btn, text=tip)
+            if text == '批量转换':
+                btn.drop_target_register(DND_FILES)
+                btn.dnd_bind('<<Drop>>', lambda e, self=self: self.root.after(100, lambda: self.batch_convert_epubs(
+                    [f for f in self.root.tk.splitlist(e.data) if f.lower().endswith('.epub')]))
+                )
 
         # 用于自动收集所有设置变量
         self._settings_vars_dict = {}
@@ -94,7 +99,7 @@ class EpubProcessor:
                 ToolTip(separator_combo, text="章节合并时插入的分隔符样式(会受到两个空行下拉框的影响)")
                 # 空行下拉框
                 for idx, (blank_var, tip_text) in enumerate([
-                    ('merge_remove_blank_lines_var', "删除指定的空行数量(空行处理不受复选框影响)"),
+                    ('merge_remove_blank_lines_var', "删除指定的空行数量(空行处理不受合并章节复选框影响)"),
                     ('merge_limit_blank_lines_var', "限制连续空行的行数")]):
                     var = tk.StringVar(value='-')
                     self._settings_vars_dict[blank_var] = var
@@ -125,7 +130,7 @@ class EpubProcessor:
         self.config_file = base_dir / "config.ini"
         self.load_app_settings()
 
-        self.regex_manager = RegexManager(root, config_path=self.config_file)
+        self.regex_manager = RegexManager(root, config_path=self.config_file, parent=self)
         self._bind_regex_save_button()
 
         # 拖拽支持
@@ -134,19 +139,14 @@ class EpubProcessor:
 
     def _bind_regex_save_button(self):
         """将正则管理器的保存按钮绑定为主程序保存方法"""
-        for child in self.regex_manager.frame.winfo_children():
-            if isinstance(child, tk.Frame):
-                btns = [w for w in child.winfo_children() if isinstance(w, tk.Button)]
-                for btn in btns:
-                    if btn.cget("text") == "保存设置":
-                        btn.config(command=self.save_app_settings)
+        [btn.config(command=self.save_app_settings)
+        for child in self.regex_manager.frame.winfo_children() if isinstance(child, tk.Frame)
+        for btn in child.winfo_children() if isinstance(btn, tk.Button) and btn.cget("text") == "保存设置"]
 
     def _on_drop_epub(self, event):
         # 只处理epub拖拽加载
-        files = self.root.tk.splitlist(event.data)
-        self.epub_path = next((f for f in files if f.lower().endswith('.epub')), None)
-        if self.epub_path:
-            logger.info(f"拖拽载入epub: {self.epub_path}")
+        self.epub_path = next((f for f in self.root.tk.splitlist(event.data) if f.lower().endswith('.epub')), None)
+        if self.epub_path: logger.info(f"拖拽载入epub: {self.epub_path}")
 
     def open_file_dialog(self):
         self.epub_path = filedialog.askopenfilename(filetypes=[('EPUB文件', '*.epub')])
@@ -157,26 +157,21 @@ class EpubProcessor:
             messagebox.showwarning("警告", "请先选择EPUB文件")
             return
         output_filename = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[('EPUB文件', '*.epub')])
-        if output_filename:
-            self.process_epub(output_filename)
+        if output_filename: self.process_epub(output_filename)
 
-    def batch_convert_epubs(self):
-        epub_paths = filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])
-        if not epub_paths:
-            return
-        for epub_path in epub_paths:
-            try:
-                epub_path = Path(epub_path)
-                output_dir = epub_path.parent / "output"
-                output_dir.mkdir(exist_ok=True)
-                output_filename = output_dir / epub_path.name
-                self.epub_path = str(epub_path)
-                self.process_epub(str(output_filename))
-                logger.info(f"批量转换完成: {output_filename}")
-            except Exception as e:
-                logger.error(f"批量转换失败: {epub_path} - {e}")
+    def batch_convert_epubs(self, epub_paths=None):
+        if not (ps := epub_paths or filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])): return
+        out = Path(ps[0]).parent / 'output'; out.mkdir(exist_ok=True)
+        counts = {'ERROR': 0, 'WARNING': 0}
+        log_id = logger.add(lambda r: counts.update({r['level'].name: counts[r['level'].name] + 1}) or None, level="WARNING")
+        for p in ps:
+            try: self.epub_path, out_file = p, out/Path(p).name; self.process_epub(str(out_file))
+            except Exception as e: logger.error(f"转换失败: {p} - {e}")
+        logger.remove(log_id)
+        logger.success(f"批量转换完成: 共{len(ps)}，ERROR:{counts['ERROR']}，WARNING:{counts['WARNING']}")
 
     def process_epub(self, output_filename):
+        """实际开始处理流程"""
         logger.info(f"开始处理epub文件: {self.epub_path}")
         class_name = self.class_name_var.get()
 
@@ -347,7 +342,7 @@ class EpubProcessor:
             try:
                 start_idx = spine_files.index(entry_file)
             except ValueError:
-                logger.warning(f"目录条目文件未在spine中找到: {entry_file}")
+                logger.warning(f"目录条目文件未在spine中找到: {entry_file} 需对照目录跟opf中的路径")
                 continue
 
             # 计算合并范围
@@ -687,8 +682,8 @@ class EpubProcessor:
             img_tags = ruby_tag.find_all('img')  # 查找ruby内所有img标签
             rt_tags = ruby_tag.find_all('rt')  # 查找ruby内所有rt标签
             merged_content = ''.join(rt.get_text(strip=True) for rt in rt_tags if rt.get_text(strip=True)) # 合并 <rt> 标签 忽略所有的嵌套标签
-            for rt in rt_tags:
-                rt.extract()  # 删除残留的原rt标签
+            for rt in rt_tags: rt.extract()  # 删除残留的原rt标签
+            for rb in ruby_tag.find_all('rb'): rb.unwrap() # 删除全部rb标签
             if img_tags:  # ruby内含图片的处理
                 for child in list(ruby_tag.contents):  # 遍历ruby内所有子节点
                     if getattr(child, 'name', None) != 'rt':  # 除rt标签内容
@@ -903,10 +898,7 @@ class EpubProcessor:
     def save_app_settings(self, return_config=False):
         """保存AppSettings到config.ini，或返回ConfigParser对象"""
         config = configparser.ConfigParser()
-        config['AppSettings'] = {
-            name: str(var.get())
-            for name, var in self._settings_vars_dict.items()
-        }
+        config['AppSettings'] = {name: str(var.get()) for name, var in self._settings_vars_dict.items()}
         if return_config:
             return config
         # 统一保存AppSettings和RegexRules
@@ -931,47 +923,40 @@ class EpubProcessor:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             # 只提取 [AppSettings] 段
-            app_settings_text = ""
+            app_settings_lines = []
             in_section = False
             for line in content.splitlines():
                 if line.strip().startswith("[AppSettings]"):
                     in_section = True
-                    app_settings_text += line + "\n"
-                    continue
                 if in_section:
                     if line.strip().startswith("[") and not line.strip().startswith("[AppSettings]"):
                         break
-                    app_settings_text += line + "\n"
+                    app_settings_lines.append(line)
+            app_settings_text = "\n".join(app_settings_lines)
             if not app_settings_text.strip():
                 return
             config = configparser.ConfigParser()
             config.read_string(app_settings_text)
             if 'AppSettings' in config:
-                for name, var in self._settings_vars_dict.items():
-                    if name in config['AppSettings']:
-                        # 判断类型
-                        if isinstance(var, tk.BooleanVar):
-                            var.set(config['AppSettings'].getboolean(name))
-                        else:
-                            var.set(config['AppSettings'][name])
+                [var.set(config['AppSettings'].getboolean(name)) if isinstance(var, tk.BooleanVar) else var.set(config['AppSettings'][name])
+                 for name, var in self._settings_vars_dict.items() if name in config['AppSettings']]
             logger.info(f"设置已加载: {self.config_file}")
         except Exception as e:
             logger.error(f"加载设置失败: {e}")
 
     def reset_app_settings(self):
-        """重置所有设置为控件默认值"""
-        for name, var in self._settings_vars_dict.items():
-            # 直接重置为控件初始化时的默认值
-            if isinstance(var, tk.BooleanVar):
-                var.set(True)
-            elif isinstance(var, tk.StringVar):
-                # 这里可以根据你的需求设置默认值
-                if name == 'class_name_var':
-                    var.set('em-sesame|em-dot')
-                elif name == 'image_params_var':
-                    var.set("-f webp -q80 -H 300 -s 1.4 -w7")
-                else:
-                    var.set('')
+        """重置所有设置为控件默认值，并重置正则规则"""
+        [var.set(True) if isinstance(var, tk.BooleanVar)
+        else var.set(
+            'em-sesame|em-dot' if name == 'class_name_var' else
+            "-f webp -q80 -H1300 -W1200 -s1.0 -w8" if name == 'image_params_var' else
+            'hr+br' if name == 'merge_separator_var' else
+            '-' if name == 'merge_remove_blank_lines_var' else
+            '3' if name == 'merge_limit_blank_lines_var' else
+            '')
+        for name, var in self._settings_vars_dict.items()]
+        # 同步重置正则规则
+        if hasattr(self, 'regex_manager'): self.regex_manager.reset_to_default()
 
 if __name__ == "__main__":
     logger.info("程序初始化")
