@@ -16,7 +16,7 @@ jobs:
     - name: 设置Python环境
       uses: actions/setup-python@v5
       with:
-        python-version: 3.8
+        python-version: 3.13
 
     - name: 安装依赖
       run: |

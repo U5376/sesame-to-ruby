@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import shutil
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -323,20 +324,12 @@ class RegexManager:
 
     def _add_ini_menu_tooltip(self):
         """下拉框悬浮提示配置名"""
-        def show_tip(event):
-            hide_tip(event)
-            idx = self.ini_menu.current()
-            name = self.ini_names[idx] if 0 <= idx < len(self.ini_names) else self.selected_ini.get()
-            x, y = self.ini_menu.winfo_rootx() + 30, self.ini_menu.winfo_rooty() + self.ini_menu.winfo_height() + 5
-            self._ini_tip = tk.Toplevel(self.ini_menu)
-            self._ini_tip.overrideredirect(True)
-            self._ini_tip.geometry(f"+{x}+{y}")
-            tk.Label(self._ini_tip, text=name, bg="#FFFFE0", relief="solid", borderwidth=1, font=("宋体", 10), wraplength=400, justify="left").pack(padx=5, pady=3)
-        def hide_tip(event):
-            getattr(self, '_ini_tip', None) and self._ini_tip.destroy()
-            self._ini_tip = None
-        [self.ini_menu.bind(ev, show_tip) for ev in ("<Enter>", "<Motion>")]
-        self.ini_menu.bind("<Leave>", hide_tip)
+        get_tip = lambda: (
+            f"{(self.ini_names[idx] if 0<=(idx:=self.ini_menu.current())<len(self.ini_names) else self.selected_ini.get())}"
+            "\n\n右键管理配置文件\n复制为新配置不会主动加载\n可手动保存现有配置进新ini")
+        self._ini_menu_tip = ToolTip(self.ini_menu, get_tip(), wrap_length=400)
+        update = lambda e: setattr(self._ini_menu_tip, 'text', get_tip())
+        for event in ("<Enter>", "<<ComboboxSelected>>"): self.ini_menu.bind(event, update, add="+")
 
     def _add_ini_menu_manage(self):
         self.ini_menu.bind("<Button-3>", lambda e: self._show_ini_manage_window()) #ini下拉框添加右键管理菜单
@@ -368,7 +361,8 @@ class RegexManager:
                 try:
                     os.rename(old_path, new_path)
                     tree.item(row, values=(new_name, new_path))
-                    self._init_ini_files(); self.load_config(str(new_path))
+                    self._init_ini_files(); self.config_file = Path(new_path)
+                    if self.parent: self.parent.config_file = Path(new_path)
                     self.ini_menu['values'] = self.ini_names
                     self.ini_menu.set(new_name); self.selected_ini.set(new_name)
                 except Exception as e:
@@ -389,9 +383,9 @@ class RegexManager:
                 new_path = base / new_name
                 if not new_path.exists(): break
             try:
-                import shutil
                 shutil.copy2(old_path, new_path)
-                self._init_ini_files(); self.load_config(str(new_path))
+                self._init_ini_files(); self.config_file = Path(new_path)
+                if self.parent: self.parent.config_file = Path(new_path)
                 self.ini_menu['values'] = self.ini_names
                 self.ini_menu.set(new_name); self.selected_ini.set(new_name)
                 tree.delete(*tree.get_children())
