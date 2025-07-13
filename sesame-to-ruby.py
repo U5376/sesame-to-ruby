@@ -20,6 +20,7 @@ from Image import icon_base64
 from tooltip import ToolTip
 from epub_ncx_generator import EpubNCXGenerator
 from regex_manager import RegexManager
+from class_list import ClassList
 
 class EpubProcessor:
     def __init__(self, root):
@@ -163,7 +164,7 @@ class EpubProcessor:
         if not (ps := epub_paths or filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])): return
         out = Path(ps[0]).parent / 'output'; out.mkdir(exist_ok=True)
         counts = {'ERROR': 0, 'WARNING': 0}
-        log_id = logger.add(lambda r: counts.update({r['level'].name: counts[r['level'].name] + 1}) or None, level="WARNING")
+        log_id = logger.add(lambda r: counts.update({r.level.name: counts[r.level.name] + 1}) or None, level="WARNING")
         for p in ps:
             try: self.epub_path, out_file = p, out/Path(p).name; self.process_epub(str(out_file))
             except Exception as e: logger.error(f"转换失败: {p} - {e}")
@@ -281,9 +282,16 @@ class EpubProcessor:
         custom_css_src = base_dir / 'style.css'
         if custom_css_src.exists():
             shutil.copy2(custom_css_src, css_target_dir / 'style.css')
-            logger.info("添加style.css 完成")
-        else:
-            logger.warning(f"自定义 style.css 文件不存在: {custom_css_src}")
+            try:
+                temp_style = getattr(self, 'temp_style_content', '')
+                if temp_style.strip():
+                    open(css_target_dir / 'style.css', "a", encoding="utf-8").write("\n" + temp_style)
+                    logger.info("已追加临时样式到 style.css")
+                else:
+                    logger.debug("临时样式为空，未追加")
+                logger.success("添加style.css 完成")
+            except Exception as e:
+                logger.error(f"[DEBUG] 获取临时样式内容失败: {e}")
         # 6. 在所有 XHTML 文件中添加样式表链接并清理样式
         xhtml_count = 0
         for file_path in temp_dir.rglob("*"):
@@ -823,77 +831,15 @@ class EpubProcessor:
         if not hasattr(self, 'epub_path'):
             messagebox.showwarning("警告", "请先选择EPUB文件")
             return
-        cw = tk.Toplevel(self.root)
-        cw.title("html内样式收集分析")
-        cw.geometry(f"320x420+{self.root.winfo_x()+130}+{self.root.winfo_y()+60}")
-
-        tree_frame = ttk.Frame(cw)
-        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse")
-        tree.grid(row=0, column=0, sticky="nsew")
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        vsb.grid(row=0, column=1, sticky="ns")
-        tree.configure(yscrollcommand=vsb.set)
-        tree_frame.columnconfigure(0, weight=1)
-        tree_frame.rowconfigure(0, weight=1)
-
-        style_data, used_classes, used_spans, used_images = {}, set(), set(), set()
-        css_pattern = re.compile(r'([^{]+)\{([^}]+)\}', re.DOTALL)
-        html_pattern = re.compile(r'.*\.(x?html?)$', re.I)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            with zipfile.ZipFile(self.epub_path, 'r') as zf: zf.extractall(tmp)
-            for root, _, files in os.walk(tmp):
-                for file in files:
-                    path = os.path.join(root, file)
-                    rel = os.path.relpath(path, tmp)
-                    if file.endswith('.css'):
-                        with open(path, 'r', encoding='utf-8') as f:
-                            content = re.sub(r'/\*.*?\*/', '', f.read(), flags=re.DOTALL)
-                            for sel, body in css_pattern.findall(content):
-                                sel = [s.strip() for s in sel.split(',')]
-                                fmt = re.sub(r';\s*', ';\n  ', body.strip())
-                                for s in sel:
-                                    for cls in re.findall(r'\.([\w-]+)', s):
-                                        style_data.setdefault(cls, {}).setdefault(rel, []).append({'selector': s, 'content': fmt})
-                    elif html_pattern.match(file):
-                        with open(path, 'r', encoding='utf-8') as f:
-                            soup = BeautifulSoup(f.read(), 'html.parser')
-                            used_classes |= {cls for tag in soup.find_all(class_=True) for cls in tag.get('class', [])}
-                            used_spans   |= {cls for tag in soup.find_all('span') if tag.get('class') for cls in tag['class']}
-                            used_images  |= {cls for tag in soup.find_all('img') if tag.get('class') for cls in tag['class']}
-        nodes = {
-            'Class列表': (used_classes, tree.insert("", "end", text="Class列表", open=True)),
-            'Span列表':  (used_spans,   tree.insert("", "end", text="Span列表", open=True)),
-            '图片Class列表': (used_images,  tree.insert("", "end", text="图片Class列表", open=True))
-        }
-        for _, (classes, node) in nodes.items():
-            for cls in sorted(classes):
-                tree.insert(node, "end", text=cls)
-        def show_details(event):
-            item = tree.selection()[0]
-            parent = tree.parent(item)
-            if parent in (nodes['Class列表'][1], nodes['Span列表'][1], nodes['图片Class列表'][1]):
-                name = tree.item(item, "text")
-                details = []
-                if name in style_data:
-                    for path, rules in style_data[name].items():
-                        for rule in rules:
-                            lines = [f"  {line.strip()}" for line in rule['content'].split('\n') if line.strip()]
-                            details.append(f"文件: {path}\n{rule['selector']} {{\n" + '\n'.join(lines) + "\n}\n\n")
-                win = tk.Toplevel(cw)
-                win.title(name)
-                win.geometry(f"350x180+{self.root.winfo_x()+160}+{self.root.winfo_y()+130}")
-                frame = ttk.Frame(win)
-                frame.pack(fill="both", expand=True, padx=5, pady=5)
-                text = tk.Text(frame, wrap="word", font=('Consolas', 10))
-                text.insert("end", "".join(details) or f"未找到 {name} 的CSS定义")
-                text.config(state="disabled")
-                vsb = ttk.Scrollbar(frame, command=text.yview)
-                text.config(yscrollcommand=vsb.set)
-                vsb.pack(side="right", fill="y")
-                text.pack(side="left", fill="both", expand=True)
-        tree.bind("<Double-1>", show_details)
+        if not hasattr(self, 'temp_style_content'):
+            self.temp_style_content = ""
+        def get_temp_style_content():
+            return self.temp_style_content
+        def set_temp_style_content(content):
+            self.temp_style_content = content
+        def append_temp_style_content(content):
+            self.temp_style_content += content
+        ClassList(self.root, self.epub_path, get_temp_style_content, set_temp_style_content, append_temp_style_content)
 
     def save_app_settings(self, return_config=False):
         """保存AppSettings到config.ini，或返回ConfigParser对象"""
@@ -961,6 +907,7 @@ class EpubProcessor:
 if __name__ == "__main__":
     logger.info("程序初始化")
     root = TkinterDnD.Tk()
+    root.geometry("+600+160")
     processor = EpubProcessor(root)
     logger.info("进入主循环")
     root.mainloop()
