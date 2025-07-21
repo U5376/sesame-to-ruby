@@ -164,7 +164,7 @@ class EpubProcessor:
         if not (ps := epub_paths or filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])): return
         out = Path(ps[0]).parent / 'output'; out.mkdir(exist_ok=True)
         counts = {'ERROR': 0, 'WARNING': 0}
-        log_id = logger.add(lambda r: counts.update({r.level.name: counts[r.level.name] + 1}) or None, level="WARNING")
+        log_id = logger.add(lambda r: counts.update({r.record["level"].name: counts[r.record["level"].name] + 1}) or None, level="WARNING")
         for p in ps:
             try: self.epub_path, out_file = p, out/Path(p).name; self.process_epub(str(out_file))
             except Exception as e: logger.error(f"转换失败: {p} - {e}")
@@ -336,6 +336,14 @@ class EpubProcessor:
         if not toc_entries:
             logger.warning("未找到有效目录，跳过合并")
             return
+        # 过滤掉实际文件不存在的目录条目
+        toc_entries = [
+            entry
+            for entry in toc_entries
+            if not (href := entry['href'].split('#')[0])
+            or (entry_file := (opf_dir / href).resolve()).exists()
+            or not logger.warning(f"目录条目文件不存在，已跳过: {entry_file}")
+        ]
 
         logger.debug(f"Spine文件列表: {spine_files}")
         logger.debug(f"目录条目: {toc_entries}")

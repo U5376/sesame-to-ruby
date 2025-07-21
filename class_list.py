@@ -150,11 +150,12 @@ class ClassList:
             tree.selection_remove(tree.selection())
             for group, cls, iid in all_items:
                 show = False
-                for path, rules in style_data[cls].items():
-                    for rule in rules:
-                        if keyword in rule['selector'].lower() or keyword in rule['content'].lower():
-                            show = True
-                            break
+                if cls in style_data:  # 修复 KeyError
+                    for path, rules in style_data[cls].items():
+                        for rule in rules:
+                            if keyword in rule['selector'].lower() or keyword in rule['content'].lower():
+                                show = True
+                                break
                 tree.detach(iid)
                 if show:
                     tree.reattach(iid, nodes[group][1], "end")
