@@ -7,37 +7,34 @@ from loguru import logger
 class EpubNCXGenerator:
     @staticmethod
     def generate_ncx(opf_path):
-        """
-        基于NAV文件生成精确的NCX目录
-        返回：(success, message)
-        """
+        """基于nav文件生成精确的NCX目录"""
         try:
             opf_dir = Path(opf_path).parent
             ncx_path = opf_dir / 'toc.ncx'
             nav_path = EpubNCXGenerator._find_nav_path(opf_path)
             if ncx_path.exists():
-                logger.info("toc.ncx已存在，已确保OPF引用和spine属性")
-                # 仍然需要确保OPF引用和spine属性正确
                 EpubNCXGenerator._update_opf_reference(opf_path)
-                return True, "toc.ncx已存在，已确保OPF引用和spine属性"
+                EpubNCXGenerator.fix_ncx_paths(opf_path)
+                logger.info("toc.ncx已存在，已确保OPF引用和spine跟ncx内路径正确")
+                return True, "toc.ncx已存在，已确保OPF引用和spine跟ncx内路径正确"
             if not nav_path:
-                logger.error("未找到有效的NAV文件")
+                logger.error("未找到有效的nav文件")
                 return False, "未找到有效的NAV文件"
             # 解析NAV文件获取目录结构
             toc_entries = EpubNCXGenerator._parse_nav(nav_path, opf_dir)
             # 生成NCX内容
-            ncx_path = opf_dir / 'toc.ncx'
             uid = EpubNCXGenerator._get_uid_from_opf(opf_path)
             book_title = EpubNCXGenerator._get_book_title_from_opf(opf_path)
             
             with open(ncx_path, 'w', encoding='utf-8') as f:
                 f.write(EpubNCXGenerator._create_ncx_content(uid, toc_entries, book_title))
 
-            # 更新OPF引用
+            # 更新OPF引用跟检查ncx内路径正确
             EpubNCXGenerator._update_opf_reference(opf_path)
+            EpubNCXGenerator.fix_ncx_paths(opf_path)
             
-            logger.success("ncx生成成功（基于NAV）")
-            return True, "ncx生成成功（基于NAV）"
+            logger.success("ncx生成成功（基于nav）")
+            return True, "ncx生成成功（基于nav）"
         except Exception as e:
             logger.error(f"ncx生成失败: {str(e)}")
             return False, f"ncx生成失败: {str(e)}"
@@ -265,3 +262,33 @@ class EpubNCXGenerator:
 
         with open(opf_path, 'w', encoding='utf-8') as f:
             f.write(str(opf_soup))
+
+    @staticmethod
+    def fix_ncx_paths(opf_path):
+        """检查并修正ncx中的src路径"""
+        opf_path = Path(opf_path)
+        opf_soup = BeautifulSoup(opf_path.read_text(encoding='utf-8'), 'xml')
+        manifest = opf_soup.find('manifest')
+        id_to_href = {item['id']: item['href'] for item in manifest.find_all('item') if item.has_attr('id') and item.has_attr('href')}
+        spine_files = [id_to_href[itemref['idref']] for itemref in opf_soup.find('spine').find_all('itemref') if itemref['idref'] in id_to_href]
+        ncx_item = manifest.find('item', {'media-type': 'application/x-dtbncx+xml'})
+        ncx_path = (opf_path.parent / ncx_item['href']).resolve()
+        ncx_text = ncx_path.read_text(encoding='utf-8')
+        changed = False
+        def replace_src(match):
+            src = match.group(1)
+            src_name = Path(src.split('#')[0]).name
+            match_href = next((f for f in spine_files if Path(f).name == src_name), None)
+            if match_href and match_href != src:
+                logger.debug(f"修正ncx路径: {src} -> {match_href}")
+                nonlocal changed
+                changed = True
+                return f'src="{match_href}"'
+            return match.group(0)
+        new_ncx_text = re.sub(r'src="([^"]+)"', replace_src, ncx_text)
+        if changed:
+            ncx_path.write_text(new_ncx_text, encoding='utf-8')
+            logger.success("ncx目录路径已修正")
+            return True, "ncx目录路径已修正"
+        logger.debug("ncx目录路径无需修正")
+        return True, "ncx目录路径无需修正"
