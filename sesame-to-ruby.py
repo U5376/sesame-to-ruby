@@ -154,21 +154,17 @@ class EpubProcessor:
         logger.info(f"载入epub: {self.epub_path}")
 
     def start_conversion(self):
-        if not hasattr(self, 'epub_path'):
-            messagebox.showwarning("警告", "请先选择EPUB文件")
-            return
-        output_filename = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[('EPUB文件', '*.epub')])
-        if output_filename: self.process_epub(output_filename)
+        if not hasattr(self, 'epub_path'): return messagebox.showwarning('警告', '请先选择EPUB文件')
+        if not (fn := filedialog.asksaveasfilename(defaultextension='.epub', filetypes=[('EPUB文件', '*.epub')])): return
+        logger.opt(exception=True).catch(lambda: self.process_epub(fn))()
 
     def batch_convert_epubs(self, epub_paths=None):
         if not (ps := epub_paths or filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])): return
         out = Path(ps[0]).parent / 'output'; out.mkdir(exist_ok=True)
         counts = {'ERROR': 0, 'WARNING': 0}
-        log_id = logger.add(lambda r: counts.update({r.record["level"].name: counts[r.record["level"].name] + 1}) or None, level="WARNING")
-        for p in ps:
-            try: self.epub_path, out_file = p, out/Path(p).name; self.process_epub(str(out_file))
-            except Exception as e: logger.error(f"转换失败: {p} - {e}")
-        logger.remove(log_id)
+        logger_id = logger.add(lambda r: counts.__setitem__(r.record["level"].name, counts[r.record["level"].name]+1) or None, level='WARNING')
+        [logger.opt(exception=True).catch(lambda p=p: (setattr(self, 'epub_path', p), self.process_epub(str(out / Path(p).name))))() for p in ps]
+        logger.remove(logger_id)
         logger.success(f"批量转换完成: 共{len(ps)}，ERROR:{counts['ERROR']}，WARNING:{counts['WARNING']}")
 
     def process_epub(self, output_filename):
@@ -308,125 +304,54 @@ class EpubProcessor:
         logger.info(f"已更新 {xhtml_count} 个 XHTML 样式表链接")
 
     def merge_xhtml_files(self, temp_dir):
-        logger.info("章节间Xhtml合并(基于目录 )")
-        # 将路径转换为Path对象
-        temp_dir = Path(temp_dir)
-        opf_path = self._get_opf_path(temp_dir)
-
-        # 解析OPF文件
-        opf_content = opf_path.read_text(encoding='utf-8')
-        opf_soup = BeautifulSoup(opf_content, 'xml')
-        spine = opf_soup.spine
-        if not spine:
-            raise ValueError("OPF文件中缺少spine定义")
-
-        # 获取所有spine文件路径
-        spine_files = []
+        logger.info("章节间Xhtml合并(基于目录)")
+        temp_dir, opf_path = Path(temp_dir), self._get_opf_path(Path(temp_dir))
+        opf_soup = BeautifulSoup(opf_path.read_text('utf-8'),'xml')
+        spine = opf_soup.spine or (_ for _ in ()).throw(ValueError("OPF 文件缺少 spine 定义"))
         opf_dir = opf_path.parent
-        for itemref in spine.find_all('itemref'):
-            item = opf_soup.find('item', id=itemref['idref'])
-            if item and item.get('media-type') == 'application/xhtml+xml':
-                href = item['href']
-                if href.lower().endswith('nav.xhtml'): continue
-                # 规范化路径：处理相对路径和URL编码
-                norm_path = (opf_dir / href).resolve()
-                spine_files.append(norm_path)
-        # 解析目录结构
-        toc_entries = self._parse_toc(opf_soup, opf_path)
-        if not toc_entries:
-            logger.warning("未找到有效目录，跳过合并")
-            return
-        # 过滤掉实际文件不存在的目录条目
-        toc_entries = [
-            entry
-            for entry in toc_entries
-            if not (href := entry['href'].split('#')[0])
-            or (entry_file := (opf_dir / href).resolve()).exists()
-            or not logger.warning(f"目录条目文件不存在，已跳过: {entry_file}")
-        ]
 
+        # 构建 spine 列表
+        spine_files = [(opf_dir/itm.get('href')).resolve() for ref in spine.find_all('itemref')
+                    if (idr:=ref.get('idref')) and (itm:=opf_soup.find('item',id=idr))
+                    and itm.get('media-type')=='application/xhtml+xml'
+                    and (href:=itm.get('href')) and not href.lower().endswith('nav.xhtml')]
         logger.debug(f"Spine文件列表: {spine_files}")
-        logger.debug(f"目录条目: {toc_entries}")
 
-        for i, entry in enumerate(toc_entries):
-            # 跳过用户选择不合并的目录条目
-            if entry['href'] in self.excluded_toc_entries:
-                logger.debug(f"跳过排除的目录条目: {entry['href']}")
-                continue
-            entry_href = entry['href'].split('#')[0]
-            entry_file = opf_dir / entry_href
-            try:
-                start_idx = spine_files.index(entry_file)
-            except ValueError:
-                logger.warning(f"目录条目文件未在spine中找到: {entry_file} 需对照目录跟opf中的路径")
-                continue
+        toc = self._parse_toc(opf_soup,opf_path)
+        logger.debug(f"目录条目: {toc}")
+        toc_anchors=[]
+        for e in toc:
+            href = e.get('href') or ''
+            title = e.get('title', '无标题')
+            if href in self.excluded_toc_entries or Path(href).name in self.excluded_toc_entries: logger.debug(f"跳过排除的目录条目: {title} | ({href})"); continue
+            f = (opf_dir / href.split('#', 1)[0]).resolve()
+            if not f.exists(): logger.warning(f"目录条目文件不存在，已跳过: {title} | ({href})"); continue
+            try: idx = spine_files.index(f)
+            except ValueError: logger.warning(f"目录条目路径对照spine列表异常: {title} | ({href})"); continue
+            toc_anchors.append((idx, title, f))
+        if not toc_anchors: return logger.warning("未找到有效目录，跳过合并")
 
-            # 计算合并范围
-            if i + 1 < len(toc_entries):
-                next_entry_href = toc_entries[i+1]['href'].split('#')[0]
-                next_entry_file = opf_dir / next_entry_href
-                try:
-                    end_idx = spine_files.index(next_entry_file)
-                except ValueError:
-                    end_idx = len(spine_files)
-            else:
-                end_idx = len(spine_files)
+        toc_anchors.sort(key=lambda x:x[0])
+        sep=(self._settings_vars_dict.get('merge_separator_var') or type('',(),{'get':lambda s:'hr+br'})()).get()
+        tags=['p','hr','p'] if sep=='hr+br' else ['p']* (int(sep[0]) if sep.endswith('br') and sep[0].isdigit() else 2)
 
-            # 输出简洁的合并日志
-            main_internal = spine_files[start_idx].relative_to(temp_dir).as_posix()
-            merged_internal = [f.relative_to(temp_dir).as_posix() for f in spine_files[start_idx+1:end_idx]]
-            logger.debug(f"合并于: {main_internal} 已被合并: {merged_internal}")
-
-            # 读取主文件
-            main_file = spine_files[start_idx]
-            main_content = main_file.read_text(encoding='utf-8')
-            main_soup = BeautifulSoup(main_content, 'html.parser')
-            # 合并内容
-            for merge_path in spine_files[start_idx+1:end_idx]:
-                merge_content = merge_path.read_text(encoding='utf-8')
-                merge_soup = BeautifulSoup(merge_content, 'html.parser')
-                # 转移<body>内容
-                if main_soup.body and merge_soup.body:
-                    # 分隔样式
-                    sep_style = self._settings_vars_dict.get('merge_separator_var', None)
-                    sep_val = sep_style.get() if sep_style else 'hr+br'
-                    def add_separator(soup, parent):
-                        if sep_val == 'hr+br':
-                            # <p><br/></p><hr/><p><br/></p>
-                            for tag in ['p', 'hr', 'p']:
-                                element = soup.new_tag(tag)
-                                if tag == 'p':
-                                    element.append(soup.new_tag('br'))
-                                parent.extend([element, '\n'])
-                        else:
-                            # <p><br/></p> * N
-                            n = int(sep_val[0]) if sep_val.endswith('br') and sep_val[0].isdigit() else 2
-                            for _ in range(n):
-                                p = soup.new_tag('p')
-                                p.append(soup.new_tag('br'))
-                                parent.extend([p, '\n'])
-                    add_separator(main_soup, main_soup.body)
-                    # 复制合并文件的内容
-                    for child in merge_soup.body.children:
-                        if child.name == 'script':  # 跳过脚本标签
-                            continue
-                        main_soup.body.append(copy.copy(child))
-                # 删除已合并文件并从OPF中移除引用
-                merge_path.unlink()
-                merge_href = merge_path.relative_to(opf_dir).as_posix()
-                item = opf_soup.find('item', href=merge_href)
-                if item:
-                    item_id = item['id']
-                    # 从spine中移除itemref
-                    for itemref in spine.find_all('itemref', idref=item_id):
-                        itemref.decompose()
-                    # 从manifest中移除item
-                    item.decompose()
-            # 保存合并后的文件
-            main_file.write_text(str(main_soup), encoding='utf-8')
-        # 更新OPF文件
-        opf_path.write_text(str(opf_soup), encoding='utf-8')
-        logger.info("章节间Xhtml合并 完成")
+        modified=False
+        for i,(s,_,m) in enumerate(toc_anchors):
+            g=spine_files[s:(toc_anchors[i+1][0] if i+1<len(toc_anchors) else len(spine_files))]
+            if len(g)<2: continue
+            logger.debug(f"合并于: {g[0].relative_to(temp_dir).as_posix()} 已合并: {[x.relative_to(temp_dir).as_posix() for x in g[1:]]}")
+            ms=BeautifulSoup(m.read_text('utf-8'),'html.parser')
+            for sub in g[1:]:
+                mg=BeautifulSoup(sub.read_text('utf-8'),'html.parser')
+                if not mg.body: continue
+                for t in tags: el=ms.new_tag(t); t=='p' and el.append(ms.new_tag('br')); ms.body.append(el); ms.body.append(ms.new_string('\n'))
+                [ms.body.append(copy.copy(c)) for c in mg.body.children if c.name!='script']
+                sub.unlink(missing_ok=True)
+                rel=sub.relative_to(opf_dir).as_posix()
+                if (it:=opf_soup.find('item',href=rel)):
+                    [tg.decompose() for tg in [*spine.find_all('itemref',idref=it.get('id')),it]]; modified=True
+            m.write_text(str(ms),'utf-8')
+        (opf_path.write_text(str(opf_soup),'utf-8'),logger.info("章节间Xhtml合并 完成")) if modified else logger.info("无需更新 OPF，无章节被合并")
 
     def process_blank_lines(self, temp_dir):
         """删除空行数量限制连续空行"""
@@ -502,37 +427,25 @@ class EpubProcessor:
         return Path(temp_dir) / rootfile['full-path']
 
     def _parse_toc(self, opf_soup, opf_path):
-        """解析目录结构，兼容EPUB 2.0(NCX)和EPUB 3.0(NAV)"""
-        # 尝试解析EPUB 2.0 NCX格式
-        ncx_item = opf_soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})
-        if ncx_item:
-            ncx_path = (opf_path.parent / ncx_item['href']).resolve()
-            if ncx_path.exists():
-                with ncx_path.open('r', encoding='utf-8') as f:
-                    ncx_soup = BeautifulSoup(f.read(), 'xml')
-                if nav_map := ncx_soup.find('navMap'):
-                    return [{
-                        'title': nav_point.find('navLabel').text.strip(),
-                        'href': nav_point.find('content')['src']
-                    } for nav_point in nav_map.find_all('navPoint')]
-
-        # 尝试解析EPUB 3.0 NAV格式
-        nav_item = opf_soup.find('item', properties='nav')
-        if nav_item:
-            nav_path = (opf_path.parent / nav_item['href']).resolve()
-            if nav_path.exists():
-                with nav_path.open('r', encoding='utf-8') as f:
-                    nav_soup = BeautifulSoup(f.read(), 'html.parser')
-                nav_tag = (
-                    nav_soup.find('nav', attrs={'epub:type': 'toc'}) or 
-                    nav_soup.find('nav', attrs={'role': 'doc-toc'}) or
-                    nav_soup.find('nav', id='toc')
-                )
-                if nav_tag:
-                    return [{
-                        'title': a.text.strip(),
-                        'href': a['href'].split('#')[0]
-                    } for a in nav_tag.find_all('a', href=True)]
+        """解析目录结构 优先nav 后解析ncx"""
+        # nav
+        if (nav_item := opf_soup.find('item', properties='nav')) and (nav_path := (opf_path.parent / nav_item['href']).resolve()).exists():
+            with nav_path.open('r', encoding='utf-8') as f:
+                nav_soup = BeautifulSoup(f.read(), 'html.parser')
+            if (nav_tag := nav_soup.find('nav', attrs={'epub:type': 'toc'}) or 
+                        nav_soup.find('nav', attrs={'role': 'doc-toc'}) or
+                        nav_soup.find('nav', id='toc')):
+                return [
+                    {'title': a.text.strip(), 'href': a['href'].split('#')[0]}
+                    for a in nav_tag.find_all('a', href=True)]
+        # ncx
+        if (ncx_item := opf_soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})) and (ncx_path := (opf_path.parent / ncx_item['href']).resolve()).exists():
+            with ncx_path.open('r', encoding='utf-8') as f:
+                ncx_soup = BeautifulSoup(f.read(), 'xml')
+            if nav_map := ncx_soup.find('navMap'):
+                return [
+                    {'title': nav_point.find('navLabel').text.strip(), 'href': nav_point.find('content')['src']}
+                    for nav_point in nav_map.find_all('navPoint')]
         return []
 
     def convert_epub_images(self, temp_dir):
