@@ -155,10 +155,10 @@ class EpubNCXGenerator:
             nonlocal entries, current_parents
             for li in list_tag.find_all('li', recursive=False):
                 if a := li.find('a', href=True):
-                    href = a['href'].split('#')[0]
-                    full_path = (Path(base_dir) / href).resolve()
+                    href = a['href']  # 保留锚点
+                    full_path = (Path(base_dir) / href.split('#', 1)[0]).resolve()
                     entry = {
-                        'title': a.get_text(strip=True),
+                        'title': a.text, # 完整保留标题
                         'href': href,
                         'file_path': str(full_path),
                         'depth': depth,
@@ -277,13 +277,16 @@ class EpubNCXGenerator:
         changed = False
         def replace_src(match):
             src = match.group(1)
-            src_name = Path(src.split('#')[0]).name
+            src_path, *anchor = src.split('#', 1)
+            src_name = Path(src_path).name
             match_href = next((f for f in spine_files if Path(f).name == src_name), None)
-            if match_href and match_href != src:
-                logger.debug(f"修正ncx路径: {src} -> {match_href}")
+            if match_href and match_href != src_path:
+                # 保留锚点
+                new_src = match_href + ('#' + anchor[0] if anchor else '')
+                logger.debug(f"修正ncx路径: {src} -> {new_src}")
                 nonlocal changed
                 changed = True
-                return f'src="{match_href}"'
+                return f'src="{new_src}"'
             return match.group(0)
         new_ncx_text = re.sub(r'src="([^"]+)"', replace_src, ncx_text)
         if changed:
