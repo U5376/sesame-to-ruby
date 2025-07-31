@@ -95,7 +95,7 @@ class EpubProcessor:
                 # 分隔符下拉框
                 self.merge_separator_var = tk.StringVar(value='hr+br')
                 self._settings_vars_dict['merge_separator_var'] = self.merge_separator_var
-                separator_combo = ttk.Combobox(f_merge, textvariable=self.merge_separator_var, width=5, state="readonly", values=['hr+br'] + [f'{i}br' for i in range(2, 10)], font=FONT)
+                separator_combo = ttk.Combobox(f_merge, textvariable=self.merge_separator_var, width=5, state="readonly", values=['-','hr+br'] + [f'{i}br' for i in range(1, 9)], font=FONT)
                 separator_combo.pack(side=tk.LEFT)
                 ToolTip(separator_combo, text="章节合并时插入的分隔符样式(会受到两个空行下拉框的影响)")
                 # 空行下拉框
@@ -333,7 +333,7 @@ class EpubProcessor:
 
         toc_anchors.sort(key=lambda x:x[0])
         sep=(self._settings_vars_dict.get('merge_separator_var') or type('',(),{'get':lambda s:'hr+br'})()).get()
-        tags=['p','hr','p'] if sep=='hr+br' else ['p']* (int(sep[0]) if sep.endswith('br') and sep[0].isdigit() else 2)
+        tags=[]if sep=='-'else(['p','hr','p']if sep=='hr+br'else['p']*(int(sep[0])if sep.endswith('br')and sep[0].isdigit()else 2))
 
         modified=False
         for i,(s,_,m) in enumerate(toc_anchors):
