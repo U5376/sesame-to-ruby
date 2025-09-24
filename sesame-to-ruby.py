@@ -124,7 +124,11 @@ class EpubProcessor:
         image_check.pack(side=tk.LEFT)
         image_entry = tk.Entry(f_image, textvariable=self.image_params_var, width=30, font=FONT)
         image_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n-w 线程数 默认2\n-m WebP压缩等级 1-6 默认6 越大越慢越优")
+        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n"
+        "-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n"
+        "-A 保留透明通道Alpha 默认不保留\n"
+        "-w 线程数 默认2\n"
+        "-m WebP压缩等级 1-6 默认6 越大越慢越优")
         f_image.pack(fill=tk.X, anchor='w')
 
         base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
@@ -213,6 +217,10 @@ class EpubProcessor:
                         if self.process_ruby_enabled.get():
                             self.process_ruby(soup)
                         content = str(soup)
+
+                        if self.modify_html_enabled.get():
+                            content = self.modify_html(content, class_name)
+
                         content = self.regex_manager.apply_rules(content)
 
                         if self.process_images_enabled.get():
@@ -220,15 +228,12 @@ class EpubProcessor:
                             self.post_process_images(soup)
                             content = str(soup)
 
-                        if self.modify_html_enabled.get():
-                            content = self.modify_html(content, class_name)
-
                         with open(file_path, 'w', encoding='utf-8') as f:
                             f.write(content)
             logger.info("Ruby标签规格化 √")
+            logger.info("傍点转换ruby格式 √")
             logger.info("正则替换 √")
             logger.info("图片标签规格化 √")
-            logger.info("傍点转换ruby格式 √")
 
             # html章节间合并
             if self.merge_xhtml_enabled.get():
@@ -673,7 +678,7 @@ class EpubProcessor:
         soup = BeautifulSoup(html, 'html.parser')
         classes = [c.strip() for c in class_names.split('|') if c.strip()]
         for class_name in classes:
-            for span in soup.select(f'span[class~="{class_name}"]'):
+            for span in soup.select(f'span[class~="{class_name}"], em[class~="{class_name}"]'): 
                 ruby = soup.new_tag('ruby')
                 if span.string:
                     for char in span.string:
@@ -816,7 +821,7 @@ class EpubProcessor:
         [var.set(True) if isinstance(var, tk.BooleanVar)
         else var.set(
             'em-sesame|em-dot' if name == 'class_name_var' else
-            "-f webp -q80 -H1300 -W1200 -s1.0 -w8" if name == 'image_params_var' else
+            "-f webp -q80 -H1300 -W1200 -s1.0 -A -w8" if name == 'image_params_var' else
             'hr+br' if name == 'merge_separator_var' else
             '-' if name == 'merge_remove_blank_lines_var' else
             '3' if name == 'merge_limit_blank_lines_var' else
@@ -828,7 +833,8 @@ class EpubProcessor:
 if __name__ == "__main__":
     logger.info("程序初始化")
     root = TkinterDnD.Tk()
-    root.geometry("+600+160")
+    root.geometry("350x620+600+160")  # 设置初始窗口大小
+
     processor = EpubProcessor(root)
     logger.info("进入主循环")
     root.mainloop()
