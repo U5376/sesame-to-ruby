@@ -145,8 +145,8 @@ class RegexManager:
                     continue
                 if not line.strip(): continue
                 if '=' in line:
-                    key, value = map(str.strip, line.split('=', 1))
-                    current_rule[key], current_key = value, key
+                    key, value = line.split('=', 1)
+                    current_rule[key.strip()], current_key = value, key.strip()
                 elif current_key and (line.startswith(' ') or line.startswith('\t')):
                     current_rule[current_key] += '\n' + line.lstrip()
             current_rule and self._add_rule_from_dict(current_rule)
