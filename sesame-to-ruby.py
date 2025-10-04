@@ -5,21 +5,22 @@ import copy
 import zipfile
 import tempfile
 import subprocess
-import xml.etree.ElementTree as ET
+import shutil
+from pathlib import Path
+from urllib.parse import unquote
+import configparser
+
 import tkinter as tk
-from bs4 import BeautifulSoup
-from epub_ncx_generator import EpubNCXGenerator
-from regex_manager import RegexManager
-from tkinter import ttk, filedialog, messagebox, Entry, Label, Button, END
+from tkinter import filedialog, messagebox, ttk
+from tkinterdnd2 import DND_FILES, TkinterDnD
+from bs4 import BeautifulSoup # 需要lxml库 会优先自动使用
+from loguru import logger
+
 from Image import icon_base64
 from tooltip import ToolTip
-import warnings
-import shutil
-import lxml.etree
-from urllib.parse import unquote
-from loguru import logger
-from pathlib import Path
-import configparser
+from epub_ncx_generator import EpubNCXGenerator
+from regex_manager import RegexManager
+from class_list import ClassList
 
 class EpubProcessor:
     def __init__(self, root):
@@ -40,17 +41,22 @@ class EpubProcessor:
 
         # 按钮配置：(文本, 命令, grid(row, col), tooltip)
         btn_cfgs = [
-            ('读取epub', self.open_file_dialog, (0, 0), "加载单个epub文件"),
+            ('读取epub', self.open_file_dialog, (0, 0), "加载单个epub文件\n支持拖拽epub进UI窗口"),
             ('开始转换', self.start_conversion, (0, 1), "转换加载的单个epub文件"),
-            ('批量转换', self.batch_convert_epubs, (0, 2), "选择多个epub后立即批量转换\n在epub所在目录下创建output文件夹\n转换后的epub放入output，文件名为原epub名"),
+            ('批量转换', self.batch_convert_epubs, (0, 2), "批量转换\n支持epub拖拽到按钮\n原名文件保存至output文件夹"),
             ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
-            ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目"),
+            ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目\n批量也能排除指定的章节名"),
             ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态"),
         ]
         for text, cmd, (row, col), tip in btn_cfgs:
             btn = tk.Button(main_frame, text=text, command=cmd, font=FONT)
             btn.grid(row=row, column=col, padx=5, pady=2, sticky='w')
             ToolTip(btn, text=tip)
+            if text == '批量转换':
+                btn.drop_target_register(DND_FILES)
+                btn.dnd_bind('<<Drop>>', lambda e, self=self: self.root.after(100, lambda: self.batch_convert_epubs(
+                    [f for f in self.root.tk.splitlist(e.data) if f.lower().endswith('.epub')]))
+                )
 
         # 用于自动收集所有设置变量
         self._settings_vars_dict = {}
@@ -86,14 +92,21 @@ class EpubProcessor:
                 cb = tk.Checkbutton(f_merge, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
                 cb.pack(side=tk.LEFT)
                 ToolTip(cb, tip)
+                # 分隔符下拉框
+                self.merge_separator_var = tk.StringVar(value='hr+br')
+                self._settings_vars_dict['merge_separator_var'] = self.merge_separator_var
+                separator_combo = ttk.Combobox(f_merge, textvariable=self.merge_separator_var, width=5, state="readonly", values=['-','hr+br'] + [f'{i}br' for i in range(1, 9)], font=FONT)
+                separator_combo.pack(side=tk.LEFT)
+                ToolTip(separator_combo, text="章节合并时插入的分隔符样式(会受到两个空行下拉框的影响)")
                 # 空行下拉框
-                for var_name, tip_text in [
-                    ('merge_remove_blank_lines_var', "删除指定的空行数量"),
-                    ('merge_limit_blank_lines_var', "限制连续空行的行数")]:
+                for idx, (blank_var, tip_text) in enumerate([
+                    ('merge_remove_blank_lines_var', "删除指定的空行数量(空行处理不受合并章节复选框影响)"),
+                    ('merge_limit_blank_lines_var', "限制连续空行的行数")]):
                     var = tk.StringVar(value='-')
-                    self._settings_vars_dict[var_name] = var
-                    combo = ttk.Combobox(f_merge, textvariable=var, width=2, state="readonly", values=['-'] + [str(i) for i in range(1, 11)], font=FONT)
-                    combo.pack(side=tk.LEFT, padx=(5, 0))
+                    self._settings_vars_dict[blank_var] = var
+                    combo = ttk.Combobox(f_merge, textvariable=var, width=2, state="readonly", values=['-'] + [str(i) for i in range(1, 10)], font=FONT)
+                    # 与分隔符下拉框的间隔跟两个空行下拉框的间隔
+                    combo.pack(side=tk.LEFT, padx=(13 if idx == 0 else 3, 0))
                     ToolTip(combo, text=tip_text)
                 f_merge.pack(anchor='w')
             else:
@@ -111,54 +124,55 @@ class EpubProcessor:
         image_check.pack(side=tk.LEFT)
         image_entry = tk.Entry(f_image, textvariable=self.image_params_var, width=30, font=FONT)
         image_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n-w 线程数 默认2\n-m WebP压缩等级 1-6 默认6 越大越慢越优")
+        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n"
+        "-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n"
+        "-A 保留透明通道Alpha 默认不保留\n"
+        "-w 线程数 默认2\n"
+        "-m WebP压缩等级 1-6 默认6 越大越慢越优")
         f_image.pack(fill=tk.X, anchor='w')
 
         base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
         self.config_file = base_dir / "config.ini"
         self.load_app_settings()
 
-        self.regex_manager = RegexManager(root, config_path=self.config_file)
+        self.regex_manager = RegexManager(root, config_path=self.config_file, parent=self)
         self._bind_regex_save_button()
+
+        # 拖拽支持
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self._on_drop_epub)
 
     def _bind_regex_save_button(self):
         """将正则管理器的保存按钮绑定为主程序保存方法"""
-        for child in self.regex_manager.frame.winfo_children():
-            if isinstance(child, tk.Frame):
-                btns = [w for w in child.winfo_children() if isinstance(w, tk.Button)]
-                for btn in btns:
-                    if btn.cget("text") == "保存设置":
-                        btn.config(command=self.save_app_settings)
+        [btn.config(command=self.save_app_settings)
+        for child in self.regex_manager.frame.winfo_children() if isinstance(child, tk.Frame)
+        for btn in child.winfo_children() if isinstance(btn, tk.Button) and btn.cget("text") == "保存设置"]
+
+    def _on_drop_epub(self, event):
+        # 只处理epub拖拽加载
+        self.epub_path = next((f for f in self.root.tk.splitlist(event.data) if f.lower().endswith('.epub')), None)
+        if self.epub_path: logger.info(f"拖拽载入epub: {self.epub_path}")
 
     def open_file_dialog(self):
         self.epub_path = filedialog.askopenfilename(filetypes=[('EPUB文件', '*.epub')])
         logger.info(f"载入epub: {self.epub_path}")
 
     def start_conversion(self):
-        if not hasattr(self, 'epub_path'):
-            messagebox.showwarning("警告", "请先选择EPUB文件")
-            return
-        output_filename = filedialog.asksaveasfilename(defaultextension=".epub", filetypes=[('EPUB文件', '*.epub')])
-        if output_filename:
-            self.process_epub(output_filename)
+        if not hasattr(self, 'epub_path'): return messagebox.showwarning('警告', '请先选择EPUB文件')
+        if not (fn := filedialog.asksaveasfilename(defaultextension='.epub', filetypes=[('EPUB文件', '*.epub')])): return
+        logger.opt(exception=True).catch(lambda: self.process_epub(fn))()
 
-    def batch_convert_epubs(self):
-        epub_paths = filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])
-        if not epub_paths:
-            return
-        for epub_path in epub_paths:
-            try:
-                epub_path = Path(epub_path)
-                output_dir = epub_path.parent / "output"
-                output_dir.mkdir(exist_ok=True)
-                output_filename = output_dir / epub_path.name
-                self.epub_path = str(epub_path)
-                self.process_epub(str(output_filename))
-                logger.info(f"批量转换完成: {output_filename}")
-            except Exception as e:
-                logger.error(f"批量转换失败: {epub_path} - {e}")
+    def batch_convert_epubs(self, epub_paths=None):
+        if not (ps := epub_paths or filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])): return
+        out = Path(ps[0]).parent / 'output'; out.mkdir(exist_ok=True)
+        counts = {'ERROR': 0, 'WARNING': 0}
+        logger_id = logger.add(lambda r: counts.__setitem__(r.record["level"].name, counts[r.record["level"].name]+1) or None, level='WARNING')
+        [logger.opt(exception=True).catch(lambda p=p: (setattr(self, 'epub_path', p), self.process_epub(str(out / Path(p).name))))() for p in ps]
+        logger.remove(logger_id)
+        logger.success(f"批量转换完成: 共{len(ps)}，ERROR:{counts['ERROR']}，WARNING:{counts['WARNING']}")
 
     def process_epub(self, output_filename):
+        """实际开始处理流程"""
         logger.info(f"开始处理epub文件: {self.epub_path}")
         class_name = self.class_name_var.get()
 
@@ -203,6 +217,10 @@ class EpubProcessor:
                         if self.process_ruby_enabled.get():
                             self.process_ruby(soup)
                         content = str(soup)
+
+                        if self.modify_html_enabled.get():
+                            content = self.modify_html(content, class_name)
+
                         content = self.regex_manager.apply_rules(content)
 
                         if self.process_images_enabled.get():
@@ -210,15 +228,12 @@ class EpubProcessor:
                             self.post_process_images(soup)
                             content = str(soup)
 
-                        if self.modify_html_enabled.get():
-                            content = self.modify_html(content, class_name)
-
                         with open(file_path, 'w', encoding='utf-8') as f:
                             f.write(content)
             logger.info("Ruby标签规格化 √")
+            logger.info("傍点转换ruby格式 √")
             logger.info("正则替换 √")
             logger.info("图片标签规格化 √")
-            logger.info("傍点转换ruby格式 √")
 
             # html章节间合并
             if self.merge_xhtml_enabled.get():
@@ -268,17 +283,24 @@ class EpubProcessor:
         custom_css_src = base_dir / 'style.css'
         if custom_css_src.exists():
             shutil.copy2(custom_css_src, css_target_dir / 'style.css')
-            logger.info("添加style.css 完成")
-        else:
-            logger.warning(f"自定义 style.css 文件不存在: {custom_css_src}")
+            try:
+                temp_style = getattr(self, 'temp_style_content', '')
+                if temp_style.strip():
+                    open(css_target_dir / 'style.css', "a", encoding="utf-8").write("\n" + temp_style)
+                    logger.info("已追加临时样式到 style.css")
+                else:
+                    logger.debug("临时样式为空，未追加")
+                logger.success("添加style.css 完成")
+            except Exception as e:
+                logger.error(f"[DEBUG] 获取临时样式内容失败: {e}")
         # 6. 在所有 XHTML 文件中添加样式表链接并清理样式
         xhtml_count = 0
         for file_path in temp_dir.rglob("*"):
             if file_path.suffix.lower() not in ('.xhtml', '.html'):
                 continue
             soup = BeautifulSoup(file_path.read_text(encoding='utf-8'), 'html.parser')
-            for tag in soup.select('style, link[rel="stylesheet"]'):
-                tag.decompose()
+            # 清理样式、viewport、js脚本
+            [tag.decompose() for tag in soup.select('style, link[rel="stylesheet"], meta, script')]
             css_rel_xhtml = os.path.relpath(css_target_dir / 'style.css', file_path.parent).replace('\\', '/')
             if head := soup.find('head'):
                 head.append(soup.new_tag('link', rel='stylesheet', type='text/css', href=css_rel_xhtml))
@@ -287,106 +309,54 @@ class EpubProcessor:
         logger.info(f"已更新 {xhtml_count} 个 XHTML 样式表链接")
 
     def merge_xhtml_files(self, temp_dir):
-        logger.info("章节间Xhtml合并(基于目录 )")
-        # 将路径转换为Path对象
-        temp_dir = Path(temp_dir)
-        opf_path = self._get_opf_path(temp_dir)
-
-        # 解析OPF文件
-        opf_content = opf_path.read_text(encoding='utf-8')
-        opf_soup = BeautifulSoup(opf_content, 'xml')
-        spine = opf_soup.spine
-        if not spine:
-            raise ValueError("OPF文件中缺少spine定义")
-
-        # 获取所有spine文件路径
-        spine_files = []
+        logger.info("章节间Xhtml合并(基于目录)")
+        temp_dir, opf_path = Path(temp_dir), self._get_opf_path(Path(temp_dir))
+        opf_soup = BeautifulSoup(opf_path.read_text('utf-8'),'xml')
+        spine = opf_soup.spine or (_ for _ in ()).throw(ValueError("OPF 文件缺少 spine 定义"))
         opf_dir = opf_path.parent
-        for itemref in spine.find_all('itemref'):
-            item = opf_soup.find('item', id=itemref['idref'])
-            if item and item.get('media-type') == 'application/xhtml+xml':
-                href = item['href']
-                if href.lower().endswith('nav.xhtml'): continue
-                # 规范化路径：处理相对路径和URL编码
-                norm_path = (opf_dir / href).resolve()
-                spine_files.append(norm_path)
-        # 解析目录结构
-        toc_entries = self._parse_toc(opf_soup, opf_path)
-        if not toc_entries:
-            logger.warning("未找到有效目录，跳过合并")
-            return
 
+        # 构建 spine 列表
+        spine_files = [(opf_dir/itm.get('href')).resolve() for ref in spine.find_all('itemref')
+                    if (idr:=ref.get('idref')) and (itm:=opf_soup.find('item',id=idr))
+                    and itm.get('media-type')=='application/xhtml+xml'
+                    and (href:=itm.get('href')) and not href.lower().endswith('nav.xhtml')]
         logger.debug(f"Spine文件列表: {spine_files}")
-        logger.debug(f"目录条目: {toc_entries}")
 
-        for i, entry in enumerate(toc_entries):
-            # 跳过用户选择不合并的目录条目
-            if entry['href'] in self.excluded_toc_entries:
-                logger.debug(f"跳过排除的目录条目: {entry['href']}")
-                continue
-            entry_href = entry['href'].split('#')[0]
-            entry_file = opf_dir / entry_href
-            try:
-                start_idx = spine_files.index(entry_file)
-            except ValueError:
-                logger.warning(f"目录条目文件未在spine中找到: {entry_file}")
-                continue
+        toc = self._parse_toc(opf_soup,opf_path)
+        logger.debug(f"目录条目: {toc}")
+        toc_anchors=[]
+        for e in toc:
+            href = e.get('href') or ''
+            title = e.get('title', '无标题')
+            if href in self.excluded_toc_entries or Path(href).name in self.excluded_toc_entries: logger.debug(f"跳过排除的目录条目: {title} | ({href})"); continue
+            f = (opf_dir / href.split('#', 1)[0]).resolve()
+            if not f.exists(): logger.warning(f"目录条目文件不存在，已跳过: {title} | ({href})"); continue
+            try: idx = spine_files.index(f)
+            except ValueError: logger.warning(f"目录条目路径对照spine列表异常: {title} | ({href})"); continue
+            toc_anchors.append((idx, title, f))
+        if not toc_anchors: return logger.warning("未找到有效目录，跳过合并")
 
-            # 计算合并范围
-            if i + 1 < len(toc_entries):
-                next_entry_href = toc_entries[i+1]['href'].split('#')[0]
-                next_entry_file = opf_dir / next_entry_href
-                try:
-                    end_idx = spine_files.index(next_entry_file)
-                except ValueError:
-                    end_idx = len(spine_files)
-            else:
-                end_idx = len(spine_files)
+        toc_anchors.sort(key=lambda x:x[0])
+        sep=(self._settings_vars_dict.get('merge_separator_var') or type('',(),{'get':lambda s:'hr+br'})()).get()
+        tags=[]if sep=='-'else(['p','hr','p']if sep=='hr+br'else['p']*(int(sep[0])if sep.endswith('br')and sep[0].isdigit()else 2))
 
-            # 输出简洁的合并日志
-            main_internal = spine_files[start_idx].relative_to(temp_dir).as_posix()
-            merged_internal = [f.relative_to(temp_dir).as_posix() for f in spine_files[start_idx+1:end_idx]]
-            logger.debug(f"合并于: {main_internal} 已被合并: {merged_internal}")
-
-            # 读取主文件
-            main_file = spine_files[start_idx]
-            main_content = main_file.read_text(encoding='utf-8')
-            main_soup = BeautifulSoup(main_content, 'html.parser')
-            # 合并内容
-            for merge_path in spine_files[start_idx+1:end_idx]:
-                merge_content = merge_path.read_text(encoding='utf-8')
-                merge_soup = BeautifulSoup(merge_content, 'html.parser')
-                # 转移<body>内容
-                if main_soup.body and merge_soup.body:
-                    # 添加双br标签夹hr标签隔开
-                    def add_separator(soup, parent):
-                        for tag in ['p', 'hr', 'p']:
-                            element = soup.new_tag(tag)
-                            if tag == 'p':
-                                element.append(soup.new_tag('br'))
-                            parent.extend([element, '\n'])
-                    add_separator(main_soup, main_soup.body)
-                    # 复制合并文件的内容
-                    for child in merge_soup.body.children:
-                        if child.name == 'script':  # 跳过脚本标签
-                            continue
-                        main_soup.body.append(copy.copy(child))
-                # 删除已合并文件并从OPF中移除引用
-                merge_path.unlink()
-                merge_href = merge_path.relative_to(opf_dir).as_posix()
-                item = opf_soup.find('item', href=merge_href)
-                if item:
-                    item_id = item['id']
-                    # 从spine中移除itemref
-                    for itemref in spine.find_all('itemref', idref=item_id):
-                        itemref.decompose()
-                    # 从manifest中移除item
-                    item.decompose()
-            # 保存合并后的文件
-            main_file.write_text(str(main_soup), encoding='utf-8')
-        # 更新OPF文件
-        opf_path.write_text(str(opf_soup), encoding='utf-8')
-        logger.info("章节间Xhtml合并 完成")
+        modified=False
+        for i,(s,_,m) in enumerate(toc_anchors):
+            g=spine_files[s:(toc_anchors[i+1][0] if i+1<len(toc_anchors) else len(spine_files))]
+            if len(g)<2: continue
+            logger.debug(f"合并于: {g[0].relative_to(temp_dir).as_posix()} 已合并: {[x.relative_to(temp_dir).as_posix() for x in g[1:]]}")
+            ms=BeautifulSoup(m.read_text('utf-8'),'html.parser')
+            for sub in g[1:]:
+                mg=BeautifulSoup(sub.read_text('utf-8'),'html.parser')
+                if not mg.body: continue
+                for t in tags: el=ms.new_tag(t); t=='p' and el.append(ms.new_tag('br')); ms.body.append(el); ms.body.append(ms.new_string('\n'))
+                [ms.body.append(copy.copy(c)) for c in mg.body.children if c.name!='script']
+                sub.unlink(missing_ok=True)
+                rel=sub.relative_to(opf_dir).as_posix()
+                if (it:=opf_soup.find('item',href=rel)):
+                    [tg.decompose() for tg in [*spine.find_all('itemref',idref=it.get('id')),it]]; modified=True
+            m.write_text(str(ms),'utf-8')
+        (opf_path.write_text(str(opf_soup),'utf-8'),logger.info("章节间Xhtml合并 完成")) if modified else logger.info("无需更新 OPF，无章节被合并")
 
     def process_blank_lines(self, temp_dir):
         """删除空行数量限制连续空行"""
@@ -451,52 +421,36 @@ class EpubProcessor:
             file_path.write_text(str(soup), encoding='utf-8')
 
     def _get_opf_path(self, temp_dir):
-        """解析container.xml获取opf文件路径"""
+        """解析container.xml 准确获取opf名字路径"""
         container_path = Path(temp_dir) / 'META-INF' / 'container.xml'
         with container_path.open('r', encoding='utf-8') as f:
             container_content = f.read()
-        root = ET.fromstring(container_content)
-        opf_path = None
-        for rootfile in root.findall('.//{*}rootfile'):
-            opf_path = rootfile.get('full-path')
-            if opf_path:
-                break
-        if not opf_path:
+        soup = BeautifulSoup(container_content, 'xml')
+        rootfile = soup.find('rootfile')
+        if not rootfile or not rootfile.get('full-path'):
             raise ValueError("未找到 .opf 文件路径")
-        return Path(temp_dir) / opf_path
+        return Path(temp_dir) / rootfile['full-path']
 
     def _parse_toc(self, opf_soup, opf_path):
-        """解析目录结构，兼容EPUB 2.0(NCX)和EPUB 3.0(NAV)"""
-        # 尝试解析EPUB 2.0 NCX格式
-        ncx_item = opf_soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})
-        if ncx_item:
-            ncx_path = (opf_path.parent / ncx_item['href']).resolve()
-            if ncx_path.exists():
-                with ncx_path.open('r', encoding='utf-8') as f:
-                    ncx_soup = BeautifulSoup(f.read(), 'xml')
-                if nav_map := ncx_soup.find('navMap'):
-                    return [{
-                        'title': nav_point.find('navLabel').text.strip(),
-                        'href': nav_point.find('content')['src']
-                    } for nav_point in nav_map.find_all('navPoint')]
-
-        # 尝试解析EPUB 3.0 NAV格式
-        nav_item = opf_soup.find('item', properties='nav')
-        if nav_item:
-            nav_path = (opf_path.parent / nav_item['href']).resolve()
-            if nav_path.exists():
-                with nav_path.open('r', encoding='utf-8') as f:
-                    nav_soup = BeautifulSoup(f.read(), 'html.parser')
-                nav_tag = (
-                    nav_soup.find('nav', attrs={'epub:type': 'toc'}) or 
-                    nav_soup.find('nav', attrs={'role': 'doc-toc'}) or
-                    nav_soup.find('nav', id='toc')
-                )
-                if nav_tag:
-                    return [{
-                        'title': a.text.strip(),
-                        'href': a['href'].split('#')[0]
-                    } for a in nav_tag.find_all('a', href=True)]
+        """解析目录结构 优先nav 后解析ncx"""
+        # nav
+        if (nav_item := opf_soup.find('item', properties='nav')) and (nav_path := (opf_path.parent / nav_item['href']).resolve()).exists():
+            with nav_path.open('r', encoding='utf-8') as f:
+                nav_soup = BeautifulSoup(f.read(), 'html.parser')
+            if (nav_tag := nav_soup.find('nav', attrs={'epub:type': 'toc'}) or 
+                        nav_soup.find('nav', attrs={'role': 'doc-toc'}) or
+                        nav_soup.find('nav', id='toc')):
+                return [
+                    {'title': a.text.strip(), 'href': a['href'].split('#')[0]}
+                    for a in nav_tag.find_all('a', href=True)]
+        # ncx
+        if (ncx_item := opf_soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})) and (ncx_path := (opf_path.parent / ncx_item['href']).resolve()).exists():
+            with ncx_path.open('r', encoding='utf-8') as f:
+                ncx_soup = BeautifulSoup(f.read(), 'xml')
+            if nav_map := ncx_soup.find('navMap'):
+                return [
+                    {'title': nav_point.find('navLabel').text.strip(), 'href': nav_point.find('content')['src']}
+                    for nav_point in nav_map.find_all('navPoint')]
         return []
 
     def convert_epub_images(self, temp_dir):
@@ -644,7 +598,7 @@ class EpubProcessor:
                         f.truncate()
                         logger.success("更新图片OPF清单 完成")
                     else:
-                        logger.info("[OPF] 无需修改")
+                        logger.info("图片OPF清单 无需修改")
             except Exception as e:
                 logger.error(f"[严重错误] OPF处理失败: {str(e)}")
                 raise
@@ -656,24 +610,32 @@ class EpubProcessor:
             logger.info("图片处理流程结束")
 
     def process_ruby(self, soup):
-        ruby_tags = soup.find_all('ruby')  # 查找所有的 <ruby> 标签
-        for ruby_tag in ruby_tags:
-            img_tags = ruby_tag.find_all('img')  # 查找所有的 <img> 标签
-            for img_tag in img_tags:
-                copy_tag = copy.copy(img_tag)  # 复制图片标签
-                ruby_tag.insert_before(copy_tag)  # 将复制的图片标签插入到 ruby 标签之前
-                img_tag.extract()  # 删除原始图片标签
-            rt_tags = ruby_tag.find_all('rt')  # 查找所有的 <rt> 标签
-            original_content = ruby_tag.get_text()  # 获取原始内容（不包含 <rt> 标签）
-            merged_content = ''.join(rt_tag.get_text(strip=True)for rt_tag in rt_tags if rt_tag.get_text(strip=True)) # 合并 <rt> 标签 忽略所有的嵌套标签
-            for rt_tag in rt_tags:
-                rt_tag.extract()  # 删除所有的 <rt> 标签
-            rt_tag = soup.new_tag('rt')  # 创建一个新的 <rt> 标签
-            rt_tag.string = merged_content  # 设置新的 <rt> 标签的内容
-            new_ruby_tag = soup.new_tag('ruby')  # 创建一个新的 <ruby> 标签
-            new_ruby_tag.string = original_content.replace('\n', '')  # 设置新的 <ruby> 标签的内容，并删除换行符
-            new_ruby_tag.append(rt_tag)  # 将新的 <rt> 标签添加到新的 <ruby> 标签中
-            ruby_tag.replace_with(new_ruby_tag)  # 用新的 <ruby> 标签替换原始的 <ruby> 标签
+        for ruby_tag in soup.find_all('ruby'):  # 遍历所有ruby标签
+            rt_tags = ruby_tag.find_all('rt')
+            if rt_tags and rt_tags[0].get_text(strip=True).startswith('・'):continue  # 跳过rt标签后以・开头则跳过的ruby
+            img_tags = ruby_tag.find_all('img')  # 查找ruby内所有img标签
+            rt_tags = ruby_tag.find_all('rt')  # 查找ruby内所有rt标签
+            merged_content = ''.join(rt.get_text(strip=True) for rt in rt_tags if rt.get_text(strip=True)) # 合并 <rt> 标签 忽略所有的嵌套标签
+            for rt in rt_tags: rt.extract()  # 删除残留的原rt标签
+            for rb in ruby_tag.find_all('rb'): rb.unwrap() # 删除全部rb标签
+            if img_tags:  # ruby内含图片的处理
+                for child in list(ruby_tag.contents):  # 遍历ruby内所有子节点
+                    if getattr(child, 'name', None) != 'rt':  # 除rt标签内容
+                        ruby_tag.insert_before(child.extract() if hasattr(child, 'extract') else child)  # 搬到ruby前面
+                new_ruby = soup.new_tag('ruby')  # 创建新ruby标签
+                new_ruby.string = '\u00A0'  # 空占位符 预防空标签不显示内容
+                rt = soup.new_tag('rt')  # 创建新rt标签
+                rt.string = merged_content if merged_content else '\u00A0'  # rt内容或空占位
+                new_ruby.append(rt)  # 添加rt到ruby
+                ruby_tag.replace_with(new_ruby)  # 用新ruby替换原ruby
+            else:  # 正常ruby标签处理
+                original_content = ruby_tag.get_text().replace('\n', '')  # 获取原内容并去除换行
+                new_ruby = soup.new_tag('ruby')  # 创建新ruby标签
+                new_ruby.string = original_content  # 设置ruby正文
+                rt = soup.new_tag('rt')  # 创建新rt标签
+                rt.string = merged_content  # 设置rt内容
+                new_ruby.append(rt)  # 添加rt到ruby
+                ruby_tag.replace_with(new_ruby)  # 用新ruby替换原ruby
 
     def post_process_images(self, soup):
         # 合并处理div和p标签处理逻辑 改成遍历所有img标签
@@ -716,7 +678,7 @@ class EpubProcessor:
         soup = BeautifulSoup(html, 'html.parser')
         classes = [c.strip() for c in class_names.split('|') if c.strip()]
         for class_name in classes:
-            for span in soup.select(f'span[class~="{class_name}"]'):
+            for span in soup.select(f'span[class~="{class_name}"], em[class~="{class_name}"]'): 
                 ruby = soup.new_tag('ruby')
                 if span.string:
                     for char in span.string:
@@ -795,85 +757,20 @@ class EpubProcessor:
         if not hasattr(self, 'epub_path'):
             messagebox.showwarning("警告", "请先选择EPUB文件")
             return
-        cw = tk.Toplevel(self.root)
-        cw.title("html内样式收集分析")
-        cw.geometry(f"320x420+{self.root.winfo_x()+130}+{self.root.winfo_y()+60}")
-
-        tree_frame = ttk.Frame(cw)
-        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse")
-        tree.grid(row=0, column=0, sticky="nsew")
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        vsb.grid(row=0, column=1, sticky="ns")
-        tree.configure(yscrollcommand=vsb.set)
-        tree_frame.columnconfigure(0, weight=1)
-        tree_frame.rowconfigure(0, weight=1)
-
-        style_data, used_classes, used_spans, used_images = {}, set(), set(), set()
-        css_pattern = re.compile(r'([^{]+)\{([^}]+)\}', re.DOTALL)
-        html_pattern = re.compile(r'.*\.(x?html?)$', re.I)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            with zipfile.ZipFile(self.epub_path, 'r') as zf: zf.extractall(tmp)
-            for root, _, files in os.walk(tmp):
-                for file in files:
-                    path = os.path.join(root, file)
-                    rel = os.path.relpath(path, tmp)
-                    if file.endswith('.css'):
-                        with open(path, 'r', encoding='utf-8') as f:
-                            content = re.sub(r'/\*.*?\*/', '', f.read(), flags=re.DOTALL)
-                            for sel, body in css_pattern.findall(content):
-                                sel = [s.strip() for s in sel.split(',')]
-                                fmt = re.sub(r';\s*', ';\n  ', body.strip())
-                                for s in sel:
-                                    for cls in re.findall(r'\.([\w-]+)', s):
-                                        style_data.setdefault(cls, {}).setdefault(rel, []).append({'selector': s, 'content': fmt})
-                    elif html_pattern.match(file):
-                        with open(path, 'r', encoding='utf-8') as f:
-                            soup = BeautifulSoup(f.read(), 'html.parser')
-                            used_classes |= {cls for tag in soup.find_all(class_=True) for cls in tag.get('class', [])}
-                            used_spans   |= {cls for tag in soup.find_all('span') if tag.get('class') for cls in tag['class']}
-                            used_images  |= {cls for tag in soup.find_all('img') if tag.get('class') for cls in tag['class']}
-        nodes = {
-            'Class列表': (used_classes, tree.insert("", "end", text="Class列表", open=True)),
-            'Span列表':  (used_spans,   tree.insert("", "end", text="Span列表", open=True)),
-            '图片Class列表': (used_images,  tree.insert("", "end", text="图片Class列表", open=True))
-        }
-        for _, (classes, node) in nodes.items():
-            for cls in sorted(classes):
-                tree.insert(node, "end", text=cls)
-        def show_details(event):
-            item = tree.selection()[0]
-            parent = tree.parent(item)
-            if parent in (nodes['Class列表'][1], nodes['Span列表'][1], nodes['图片Class列表'][1]):
-                name = tree.item(item, "text")
-                details = []
-                if name in style_data:
-                    for path, rules in style_data[name].items():
-                        for rule in rules:
-                            lines = [f"  {line.strip()}" for line in rule['content'].split('\n') if line.strip()]
-                            details.append(f"文件: {path}\n{rule['selector']} {{\n" + '\n'.join(lines) + "\n}\n\n")
-                win = tk.Toplevel(cw)
-                win.title(name)
-                win.geometry(f"350x180+{self.root.winfo_x()+160}+{self.root.winfo_y()+130}")
-                frame = ttk.Frame(win)
-                frame.pack(fill="both", expand=True, padx=5, pady=5)
-                text = tk.Text(frame, wrap="word", font=('Consolas', 10))
-                text.insert("end", "".join(details) or f"未找到 {name} 的CSS定义")
-                text.config(state="disabled")
-                vsb = ttk.Scrollbar(frame, command=text.yview)
-                text.config(yscrollcommand=vsb.set)
-                vsb.pack(side="right", fill="y")
-                text.pack(side="left", fill="both", expand=True)
-        tree.bind("<Double-1>", show_details)
+        if not hasattr(self, 'temp_style_content'):
+            self.temp_style_content = ""
+        def get_temp_style_content():
+            return self.temp_style_content
+        def set_temp_style_content(content):
+            self.temp_style_content = content
+        def append_temp_style_content(content):
+            self.temp_style_content += content
+        ClassList(self.root, self.epub_path, get_temp_style_content, set_temp_style_content, append_temp_style_content)
 
     def save_app_settings(self, return_config=False):
         """保存AppSettings到config.ini，或返回ConfigParser对象"""
         config = configparser.ConfigParser()
-        config['AppSettings'] = {
-            name: str(var.get())
-            for name, var in self._settings_vars_dict.items()
-        }
+        config['AppSettings'] = {name: str(var.get()) for name, var in self._settings_vars_dict.items()}
         if return_config:
             return config
         # 统一保存AppSettings和RegexRules
@@ -898,51 +795,46 @@ class EpubProcessor:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 content = f.read()
             # 只提取 [AppSettings] 段
-            app_settings_text = ""
+            app_settings_lines = []
             in_section = False
             for line in content.splitlines():
                 if line.strip().startswith("[AppSettings]"):
                     in_section = True
-                    app_settings_text += line + "\n"
-                    continue
                 if in_section:
                     if line.strip().startswith("[") and not line.strip().startswith("[AppSettings]"):
                         break
-                    app_settings_text += line + "\n"
+                    app_settings_lines.append(line)
+            app_settings_text = "\n".join(app_settings_lines)
             if not app_settings_text.strip():
                 return
             config = configparser.ConfigParser()
             config.read_string(app_settings_text)
             if 'AppSettings' in config:
-                for name, var in self._settings_vars_dict.items():
-                    if name in config['AppSettings']:
-                        # 判断类型
-                        if isinstance(var, tk.BooleanVar):
-                            var.set(config['AppSettings'].getboolean(name))
-                        else:
-                            var.set(config['AppSettings'][name])
+                [var.set(config['AppSettings'].getboolean(name)) if isinstance(var, tk.BooleanVar) else var.set(config['AppSettings'][name])
+                 for name, var in self._settings_vars_dict.items() if name in config['AppSettings']]
             logger.info(f"设置已加载: {self.config_file}")
         except Exception as e:
             logger.error(f"加载设置失败: {e}")
 
     def reset_app_settings(self):
-        """重置所有设置为控件默认值"""
-        for name, var in self._settings_vars_dict.items():
-            # 直接重置为控件初始化时的默认值
-            if isinstance(var, tk.BooleanVar):
-                var.set(True)
-            elif isinstance(var, tk.StringVar):
-                # 这里可以根据你的需求设置默认值
-                if name == 'class_name_var':
-                    var.set('em-sesame|em-dot')
-                elif name == 'image_params_var':
-                    var.set("-f webp -q80 -H 300 -s 1.4 -w7")
-                else:
-                    var.set('')
+        """重置所有设置为控件默认值，并重置正则规则"""
+        [var.set(True) if isinstance(var, tk.BooleanVar)
+        else var.set(
+            'em-sesame|em-dot' if name == 'class_name_var' else
+            "-f webp -q80 -H1300 -W1200 -s1.0 -A -w8" if name == 'image_params_var' else
+            'hr+br' if name == 'merge_separator_var' else
+            '-' if name == 'merge_remove_blank_lines_var' else
+            '3' if name == 'merge_limit_blank_lines_var' else
+            '')
+        for name, var in self._settings_vars_dict.items()]
+        # 同步重置正则规则
+        if hasattr(self, 'regex_manager'): self.regex_manager.reset_to_default()
 
 if __name__ == "__main__":
     logger.info("程序初始化")
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
+    root.geometry("350x620+600+160")  # 设置初始窗口大小
+
     processor = EpubProcessor(root)
     logger.info("进入主循环")
     root.mainloop()

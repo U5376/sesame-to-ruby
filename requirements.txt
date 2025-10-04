@@ -1,0 +1,4 @@
+BeautifulSoup4==4.13.3
+lxml==5.4.0
+loguru==0.7.3
+tkinterdnd2==0.4.3
