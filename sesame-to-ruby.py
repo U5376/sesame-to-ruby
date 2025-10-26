@@ -328,7 +328,8 @@ class EpubProcessor:
         for e in toc:
             href = e.get('href') or ''
             title = e.get('title', '无标题')
-            if href in self.excluded_toc_entries or Path(href).name in self.excluded_toc_entries: logger.debug(f"跳过排除的目录条目: {title} | ({href})"); continue
+            if href in self.excluded_toc_entries or Path(href).name in self.excluded_toc_entries or href.split('#')[0] in self.excluded_toc_entries: 
+                logger.debug(f"跳过排除的目录条目: {title} | ({href})"); continue
             f = (opf_dir / href.split('#', 1)[0]).resolve()
             if not f.exists(): logger.warning(f"目录条目文件不存在，已跳过: {title} | ({href})"); continue
             try: idx = spine_files.index(f)
