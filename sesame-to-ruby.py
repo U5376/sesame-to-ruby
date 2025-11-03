@@ -610,7 +610,22 @@ class EpubProcessor:
         finally:
             logger.info("图片处理流程结束")
 
+    def merge_ruby_tags(self, soup):
+        # 合并连续的ruby标签
+        ruby_tags, i = soup.find_all('ruby'), 0
+        while i < len(ruby_tags) - 1:
+            c, n = ruby_tags[i], ruby_tags[i + 1]
+            # 检查两个ruby标签是否相邻
+            s = c.next_sibling
+            while s and (not getattr(s, 'name', None)) and not s.strip(): s = s.next_sibling
+            if s is n:
+                # 合并两个ruby标签
+                [c.append(x) for x in list(n.contents)]
+                n.decompose(); ruby_tags = soup.find_all('ruby')
+            else: i += 1
+
     def process_ruby(self, soup):
+        self.merge_ruby_tags(soup)
         for ruby_tag in soup.find_all('ruby'):  # 遍历所有ruby标签
             rt_tags = ruby_tag.find_all('rt')
             if rt_tags and rt_tags[0].get_text(strip=True).startswith('・'):continue  # 跳过rt标签后以・开头则跳过的ruby
