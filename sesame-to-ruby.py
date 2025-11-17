@@ -318,7 +318,7 @@ class EpubProcessor:
         # 构建 spine 列表
         spine_files = [(opf_dir/itm.get('href')).resolve() for ref in spine.find_all('itemref')
                     if (idr:=ref.get('idref')) and (itm:=opf_soup.find('item',id=idr))
-                    and itm.get('media-type')=='application/xhtml+xml'
+                    and itm.get('media-type') in ['application/xhtml+xml', 'text/html']
                     and (href:=itm.get('href')) and not href.lower().endswith('nav.xhtml')]
         logger.debug(f"Spine文件列表: {spine_files}")
 
