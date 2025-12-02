@@ -80,7 +80,7 @@ class EpubProcessor:
             ("process_images_enabled", "图片标签多看交互规格化", "将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji"),
             ("merge_xhtml_enabled", "Xhtml章节间合并", "根据目录合并章节间文件"),
             ("delete_style_enabled", "删除自带Style并添加自定义样式表", "清理原有样式跟opf竖排属性\n添加css文件及更新引用\n考虑规格化头部信息"),
-            ("generate_ncx_enabled", "生成ncx并更新opf", ""),
+            ("generate_ncx_enabled", "生成ncx并更新opf", "自动对照opf列表修正路径\n最后一条目录文件不存在进行-1顺序修正"),
             ("convert_epub_version_enabled", "转Epub2.0并删除nav.xhtml", "将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明")
         ]
         for var_name, text, tip in flags_with_tooltips:
@@ -715,6 +715,7 @@ class EpubProcessor:
                 zip_ref.extractall(temp_dir)
             # 获取并解析OPF文件
             opf_path = self._get_opf_path(temp_dir_path)
+            EpubNCXGenerator.fix_ncx_paths(opf_path)
             opf_content = opf_path.read_text(encoding='utf-8')
             opf_soup = BeautifulSoup(opf_content, 'xml')
             # 获取目录条目

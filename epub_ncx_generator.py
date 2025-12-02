@@ -265,13 +265,14 @@ class EpubNCXGenerator:
 
     @staticmethod
     def fix_ncx_paths(opf_path):
-        """检查并修正ncx中的src路径"""
+        """检查并修正ncx中的src路径,尝试-1修正目录"""
         opf_path = Path(opf_path)
         opf_soup = BeautifulSoup(opf_path.read_text(encoding='utf-8'), 'xml')
         manifest = opf_soup.find('manifest')
         id_to_href = {item['id']: item['href'] for item in manifest.find_all('item') if item.has_attr('id') and item.has_attr('href')}
         spine_files = [id_to_href[itemref['idref']] for itemref in opf_soup.find('spine').find_all('itemref') if itemref['idref'] in id_to_href]
         ncx_item = manifest.find('item', {'media-type': 'application/x-dtbncx+xml'})
+        if not ncx_item or not ncx_item.get('href'): return False
         ncx_path = (opf_path.parent / ncx_item['href']).resolve()
         ncx_text = ncx_path.read_text(encoding='utf-8')
         changed = False
@@ -292,6 +293,39 @@ class EpubNCXGenerator:
         if changed:
             ncx_path.write_text(new_ncx_text, encoding='utf-8')
             logger.success("ncx目录路径已修正")
-            return True, "ncx目录路径已修正"
+            ncx_text = new_ncx_text  # 用修正后的文本继续后续判断
+
+        # 判断最后一条目录文件是否存在，不存在则批量-1修正
+        ncx_srcs = re.findall(r'src="([^"]+)"', ncx_text)
+        if not ncx_srcs:
+            logger.debug("ncx最后条目文件存在，无需偏移修正")
+            return True, "ncx最后条目文件存在"
+        last_src = ncx_srcs[-1].split('#', 1)[0]
+        last_file = (opf_path.parent / last_src)
+        html_hrefs = [item['href'] for item in manifest.find_all('item')
+                      if item.get('media-type') in ('text/html', 'application/xhtml+xml') and item.has_attr('href')]
+        if not last_file.exists():
+            # 取最后一条的title
+            soup = BeautifulSoup(ncx_text, 'xml')
+            last_title = (nav_points := soup.find_all('navPoint')) and (nav_label := nav_points[-1].find('navLabel')) and nav_label.text.strip() or ""
+            logger.warning(f"最后一条目录文件不存在 {last_title} | ({ncx_srcs[-1]}) 全部目录批量-1修正")
+            offset_changed = False
+            def offset_replace_src(match):
+                src = match.group(1)
+                src_path, *anchor = src.split('#', 1)
+                try:
+                    idx = html_hrefs.index(src_path)
+                    new_href = html_hrefs[idx-1] if idx > 0 else src_path
+                except ValueError:
+                    new_href = html_hrefs[-1] if src_path == last_src and html_hrefs else src_path
+                if new_href == src_path: return match.group(0)
+                nonlocal offset_changed
+                offset_changed = True
+                return f'src="{new_href + ("#" + anchor[0] if anchor else "")}"'
+            offset_ncx_text = re.sub(r'src="([^"]+)"', offset_replace_src, ncx_text)
+            if offset_changed:
+                ncx_path.write_text(offset_ncx_text, encoding='utf-8')
+                return True, "ncx目录已批量-1修正"
+            return True, "ncx目录无需批量-1修正"
         logger.debug("ncx目录路径无需修正")
         return True, "ncx目录路径无需修正"
