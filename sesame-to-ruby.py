@@ -328,7 +328,7 @@ class EpubProcessor:
         for e in toc:
             href = e.get('href') or ''
             title = e.get('title', '无标题')
-            if href in self.excluded_toc_entries or Path(href).name in self.excluded_toc_entries or href.split('#')[0] in self.excluded_toc_entries: 
+            if ((title, href) in (ex := self.excluded_toc_entries) or any(title == t for t, _ in ex) or (title, href.split('#')[0]) in ex):
                 logger.debug(f"跳过排除的目录条目: {title} | ({href})"); continue
             f = (opf_dir / href.split('#', 1)[0]).resolve()
             if not f.exists(): logger.warning(f"目录条目文件不存在，已跳过: {title} | ({href})"); continue
@@ -756,7 +756,7 @@ class EpubProcessor:
         tree.bind("<Button-1>", toggle_selection)
         # 确认按钮
         def on_confirm():
-            self.excluded_toc_entries = [tree.item(i)['values'][1] for i in tree.selection()]
+            self.excluded_toc_entries = [(v[0], v[1]) for i in tree.selection() if (v := tree.item(i)['values'])]
             dialog.destroy()
         confirm_btn = ttk.Button(dialog, text="确认", command=on_confirm)
         # 布局
