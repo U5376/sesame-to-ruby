@@ -19,7 +19,7 @@ from loguru import logger
 from Image import icon_base64
 from tooltip import ToolTip
 from epub_ncx_generator import EpubNCXGenerator
-from regex_manager import RegexManager
+from regex_manager import RegexManager, AutoScrollbar
 from class_list import ClassList
 
 class EpubProcessor:
@@ -58,81 +58,60 @@ class EpubProcessor:
                     [f for f in self.root.tk.splitlist(e.data) if f.lower().endswith('.epub')]))
                 )
 
-        # 用于自动收集所有设置变量
-        self._settings_vars_dict = {}
-        self.fix_language_var = tk.StringVar(value='')
-        self._settings_vars_dict['fix_language_var'] = self.fix_language_var
-
-        # 傍点转ruby设置
-        self.modify_html_enabled = tk.BooleanVar(value=True)
-        self._settings_vars_dict['modify_html_enabled'] = self.modify_html_enabled
-        self.class_name_var = tk.StringVar(value='em-sesame|em-dot')
-        self._settings_vars_dict['class_name_var'] = self.class_name_var
-        f_ruby = tk.Frame(root)
-        ruby_check = tk.Checkbutton(f_ruby, text="傍点转ruby", variable=self.modify_html_enabled, font=FONT)
-        ruby_check.pack(side=tk.LEFT)
-        ToolTip(ruby_check, text="需要检查class")
-        ruby_entry = tk.Entry(f_ruby, textvariable=self.class_name_var, width=25, font=FONT)
-        ruby_entry.pack(side=tk.LEFT)
-        ToolTip(ruby_entry, text="一般class名:\nem-sesame|em-dot")
-        f_ruby.pack(fill=tk.X, anchor='w')
-
-        flags_with_tooltips = [
-            ("process_ruby_enabled", "Ruby格式规格化", "格式奇怪跟包含gaiji图片的标签规格化兼容处理"),
-            ("process_images_enabled", "图片标签多看交互规格化", "将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji"),
-            ("merge_xhtml_enabled", "Xhtml章节间合并", "根据目录合并章节间文件"),
-            ("delete_style_enabled", "删除自带Style并添加自定义样式表", "清理原有样式跟opf竖排属性\n添加css文件及更新引用\n读取设置语言标识修改\n考虑规格化头部信息"),
-            ("generate_ncx_enabled", "生成ncx并更新opf", "自动对照opf列表修正路径\n最后一条目录文件不存在进行-1顺序修正"),
-            ("convert_epub_version_enabled", "转Epub2.0并删除nav.xhtml", "将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明")
+        # 处理选项 滚动条区域
+        self._settings_vars_dict = {}  # 自动收集所有设置变量
+        MAX_SHOW = 8  
+        self.CFG = [
+            ('modify_html_enabled', '傍点转ruby', '需要检查class', [('class_name_var', 'em-sesame|em-dot|kenten', tk.Entry, {'w': 25}, '一般class名:\nem-sesame|em-dot|kenten')]),
+            ('process_ruby_enabled', 'Ruby格式规格化', '格式奇怪跟包含gaiji图片的标签规格化兼容处理', []),
+            ('process_images_enabled', '图片标签多看交互规格化', '将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji', []),
+            ('merge_xhtml_enabled', 'Xhtml章节间合并', '根据目录合并章节间文件', [
+                ('merge_separator_var', '3br', ttk.Combobox, {'w': 5, 'val': ['-','hr+br']+[f'{i}br' for i in range(1, 9)]}, '章节合并时插入的分隔符样式'),
+                ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, '删除指定的空行数量'),
+                ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
+            ('delete_style_enabled', '删除自带Style并添加自定义样式表', '清理原有样式跟opf竖排属性\n添加css文件及更新引用\n考虑规格化头部信息', []),
+            ('generate_ncx_enabled', '生成ncx并更新opf', '自动对照opf列表修正路径\n最后一条目录文件不存在进行-1顺序修正', []),
+            ('convert_epub_version_enabled', '转Epub2.0并删除nav.xhtml', '将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明', []),
+            ('convert_images_var', '转换图片', '图片转换设置', [
+                ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
+                 ('-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n'
+                  '-s 锐化 默认1.0不处理\n-A 保留透明通道Alpha\n-w 线程数\n-m WebP压缩等级 1-6'))]),
+            ('set_lang_enabled', '语言标识', '手动更改dc:language', [('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN')]),
         ]
-        for var_name, text, tip in flags_with_tooltips:
-            var = tk.BooleanVar(value=True)
-            setattr(self, var_name, var)
-            self._settings_vars_dict[var_name] = var
-            if var_name == "merge_xhtml_enabled":
-                f_merge = tk.Frame(root)
-                cb = tk.Checkbutton(f_merge, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
-                cb.pack(side=tk.LEFT)
-                ToolTip(cb, tip)
-                # 分隔符下拉框
-                self.merge_separator_var = tk.StringVar(value='hr+br')
-                self._settings_vars_dict['merge_separator_var'] = self.merge_separator_var
-                separator_combo = ttk.Combobox(f_merge, textvariable=self.merge_separator_var, width=5, state="readonly", values=['-','hr+br'] + [f'{i}br' for i in range(1, 9)], font=FONT)
-                separator_combo.pack(side=tk.LEFT)
-                ToolTip(separator_combo, text="章节合并时插入的分隔符样式(会受到两个空行下拉框的影响)")
-                # 空行下拉框
-                for idx, (blank_var, tip_text) in enumerate([
-                    ('merge_remove_blank_lines_var', "删除指定的空行数量(空行处理不受合并章节复选框影响)"),
-                    ('merge_limit_blank_lines_var', "限制连续空行的行数")]):
-                    var = tk.StringVar(value='-')
-                    self._settings_vars_dict[blank_var] = var
-                    combo = ttk.Combobox(f_merge, textvariable=var, width=2, state="readonly", values=['-'] + [str(i) for i in range(1, 10)], font=FONT)
-                    # 与分隔符下拉框的间隔跟两个空行下拉框的间隔
-                    combo.pack(side=tk.LEFT, padx=(13 if idx == 0 else 3, 0))
-                    ToolTip(combo, text=tip_text)
-                f_merge.pack(anchor='w')
-            else:
-                cb = tk.Checkbutton(root, text=text, variable=var, onvalue=True, offvalue=False, font=FONT)
-                cb.pack(anchor='w')
-                ToolTip(cb, tip)
+        # 1.变量初始化
+        for k, _, _, ex in self.CFG:
+            v = tk.BooleanVar(value=True); self._settings_vars_dict[k] = v; setattr(self, k, v)
+            for ek, ev, _, _, _ in ex:
+                ev_var = tk.StringVar(value=ev); self._settings_vars_dict[ek] = ev_var; setattr(self, ek, ev_var)
+        # 2.布局
+        f_scroll = tk.Frame(root); f_scroll.pack(fill=tk.X, padx=(1, 0), pady=0)
+        cvs = tk.Canvas(f_scroll, highlightthickness=0)
+        vsb = AutoScrollbar(f_scroll, canvas=cvs, orient="vertical", command=cvs.yview)
+        cvs.configure(yscrollcommand=vsb.set)
+        cvs.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.inner = tk.Frame(cvs); win = cvs.create_window((0, 0), window=self.inner, anchor='nw')
+        # 高度自适应绑定
+        _u = lambda e=None: [
+            self.inner.update_idletasks(),
+            cvs.configure(height=sum(c.winfo_reqheight() for c in self.inner.winfo_children()[:MAX_SHOW]), 
+                          scrollregion=cvs.bbox("all")),
+            cvs.itemconfig(win, width=cvs.winfo_width())]
+        cvs.bind('<Configure>', _u); root.after(10, _u)
+        # 3.渲染逻辑
+        for i, (k, txt, tip, extras) in enumerate(self.CFG):
+            row = tk.Frame(self.inner); row.pack(fill=tk.X, anchor='w', pady=0)
+            cb = tk.Checkbutton(row, text=txt, variable=self._settings_vars_dict[k], font=FONT)
+            cb.pack(side=tk.LEFT, padx=0); ToolTip(cb, text=tip)
+            for ek, _, cls, kw, etip in extras:
+                if kw.get('sticky') == 'ew': # 图片转换 Entry 逻辑
+                    w = cls(row, textvariable=self._settings_vars_dict[ek], font=FONT)
+                    w.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=0)
+                else:
+                    w = cls(row, textvariable=self._settings_vars_dict[ek], width=kw.get('w'), font=FONT, **({'values': kw.get('val'), 'state': 'readonly'} if cls==ttk.Combobox else {}))
+                    w.pack(side=tk.LEFT, padx=kw.get('px', 0))
+                ToolTip(w, text=etip)
 
-        # 图片转换设置
-        self.convert_images_var = tk.BooleanVar(value=True)
-        self._settings_vars_dict['convert_images_var'] = self.convert_images_var
-        self.image_params_var = tk.StringVar(value="-f webp -q80 -H 300 -s 1.4 -w7")
-        self._settings_vars_dict['image_params_var'] = self.image_params_var
-        f_image = tk.Frame(root)
-        image_check = tk.Checkbutton(f_image, text="转换图片", variable=self.convert_images_var, font=FONT)
-        image_check.pack(side=tk.LEFT)
-        image_entry = tk.Entry(f_image, textvariable=self.image_params_var, width=30, font=FONT)
-        image_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ToolTip(image_entry, text="-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n"
-        "-s 锐化 默认1.0不处理\n小于1.0糊化 大于1.0锐化 锐化建议范围0.5-2.0\n"
-        "-A 保留透明通道Alpha 默认不保留\n"
-        "-w 线程数 默认2\n"
-        "-m WebP压缩等级 1-6 默认6 越大越慢越优")
-        f_image.pack(fill=tk.X, anchor='w')
-
+        # 配置路径
         base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
         self.config_file = base_dir / "config.ini"
         self.load_app_settings()
@@ -257,9 +236,9 @@ class EpubProcessor:
         temp_dir = Path(temp_dir)
         opf_path = self._get_opf_path(temp_dir)
         opf_soup = BeautifulSoup(opf_path.read_text(encoding='utf-8'), 'xml')
-        # 语言标识修改 ini隐藏参数
-        if (fix_lang := self._settings_vars_dict.get('fix_language_var')) and hasattr(fix_lang, 'get'):
-            if lang_val := fix_lang.get().strip():
+        # 语言标识修改
+        if self.set_lang_enabled.get() and (set_lang := self._settings_vars_dict.get('set_lang_var')) and hasattr(set_lang, 'get'):
+            if lang_val := set_lang.get().strip():
                 if lang_tag := opf_soup.find('dc:language'):
                     original_lang = ' '.join(lang_tag.string.strip().split())
                     logger.info(f"原始语言标识{original_lang} 已修改为{lang_val}")
