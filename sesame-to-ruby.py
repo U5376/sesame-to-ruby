@@ -60,6 +60,8 @@ class EpubProcessor:
 
         # 用于自动收集所有设置变量
         self._settings_vars_dict = {}
+        self.fix_language_var = tk.StringVar(value='')
+        self._settings_vars_dict['fix_language_var'] = self.fix_language_var
 
         # 傍点转ruby设置
         self.modify_html_enabled = tk.BooleanVar(value=True)
@@ -79,7 +81,7 @@ class EpubProcessor:
             ("process_ruby_enabled", "Ruby格式规格化", "格式奇怪跟包含gaiji图片的标签规格化兼容处理"),
             ("process_images_enabled", "图片标签多看交互规格化", "将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji"),
             ("merge_xhtml_enabled", "Xhtml章节间合并", "根据目录合并章节间文件"),
-            ("delete_style_enabled", "删除自带Style并添加自定义样式表", "清理原有样式跟opf竖排属性\n添加css文件及更新引用\n考虑规格化头部信息"),
+            ("delete_style_enabled", "删除自带Style并添加自定义样式表", "清理原有样式跟opf竖排属性\n添加css文件及更新引用\n读取设置语言标识修改\n考虑规格化头部信息"),
             ("generate_ncx_enabled", "生成ncx并更新opf", "自动对照opf列表修正路径\n最后一条目录文件不存在进行-1顺序修正"),
             ("convert_epub_version_enabled", "转Epub2.0并删除nav.xhtml", "将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明")
         ]
@@ -255,6 +257,16 @@ class EpubProcessor:
         temp_dir = Path(temp_dir)
         opf_path = self._get_opf_path(temp_dir)
         opf_soup = BeautifulSoup(opf_path.read_text(encoding='utf-8'), 'xml')
+        # 语言标识修改 ini隐藏参数
+        if (fix_lang := self._settings_vars_dict.get('fix_language_var')) and hasattr(fix_lang, 'get'):
+            if lang_val := fix_lang.get().strip():
+                if lang_tag := opf_soup.find('dc:language'):
+                    original_lang = ' '.join(lang_tag.string.strip().split())
+                    logger.info(f"原始语言标识{original_lang} 已修改为{lang_val}")
+                    lang_tag.string = lang_val
+                elif metadata := opf_soup.find('metadata'):
+                    metadata.append((new_lang := opf_soup.new_tag('dc:language')))
+                    new_lang.string = lang_val
         # 1. 删除 page-progression-direction 属性
         if (spine_tag := opf_soup.find('spine')) and 'page-progression-direction' in spine_tag.attrs:
             del spine_tag.attrs['page-progression-direction']
