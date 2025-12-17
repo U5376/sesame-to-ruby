@@ -169,9 +169,8 @@ class EpubProcessor:
             if self.convert_images_var.get():
                 self.convert_epub_images(temp_dir)
 
-            # 删除自带样式并添加自定义样式表并更新opf跟页面引用
-            if self.delete_style_enabled.get():
-                self.process_opf_and_styles(temp_dir)
+            # 删除自带样式并添加自定义样式表并更新opf跟页面引用 更改opf语言标识 跟原逻辑独立两个开关
+            self.process_opf_and_styles(temp_dir)
 
             opf_path = self._get_opf_path(temp_dir)
             # 生成ncx并更新opf
@@ -236,8 +235,11 @@ class EpubProcessor:
         temp_dir = Path(temp_dir)
         opf_path = self._get_opf_path(temp_dir)
         opf_soup = BeautifulSoup(opf_path.read_text(encoding='utf-8'), 'xml')
+        # 获取开关状态
+        is_lang_enabled = self.set_lang_enabled.get()
+        is_style_enabled = self.delete_style_enabled.get()
         # 语言标识修改
-        if self.set_lang_enabled.get() and (set_lang := self._settings_vars_dict.get('set_lang_var')) and hasattr(set_lang, 'get'):
+        if is_lang_enabled and (set_lang := self._settings_vars_dict.get('set_lang_var')) and hasattr(set_lang, 'get'):
             if lang_val := set_lang.get().strip():
                 if lang_tag := opf_soup.find('dc:language'):
                     original_lang = ' '.join(lang_tag.string.strip().split())
@@ -246,58 +248,60 @@ class EpubProcessor:
                 elif metadata := opf_soup.find('metadata'):
                     metadata.append((new_lang := opf_soup.new_tag('dc:language')))
                     new_lang.string = lang_val
-        # 1. 删除 page-progression-direction 属性
-        if (spine_tag := opf_soup.find('spine')) and 'page-progression-direction' in spine_tag.attrs:
-            del spine_tag.attrs['page-progression-direction']
-        # 2. 清理 OPF 文件中的 CSS 引用
-        for item in opf_soup.find_all('item', attrs={'media-type': 'text/css'}):
-            item.decompose()
-        # 3. 添加自定义样式表到 OPF 清单
-        opf_dir = opf_path.parent
-        css_target_dir = opf_dir / 'css'
-        os.makedirs(css_target_dir, exist_ok=True)
-        logger.debug(f"确保 CSS 目标目录存在: {css_target_dir}")
-        if manifest_tag := opf_soup.find('manifest'):
-            css_rel_path = (css_target_dir / 'style.css').relative_to(opf_dir).as_posix()
-            new_item = opf_soup.new_tag('item', href=css_rel_path, id='style-css', **{'media-type': 'text/css'})
-            manifest_tag.append(new_item)
-            logger.debug(f"已添加自定义样式表引用到 OPF 清单: {css_rel_path}")
-        opf_path.write_text(str(opf_soup), encoding='utf-8')
-        # 4. 删除所有原 CSS 文件
-        deleted = 0
-        for css_file in temp_dir.rglob('*.css'):
-            css_file.unlink()
-            deleted += 1
-        logger.debug(f"已删除 {deleted} 个原 CSS 文件")
-        # 5. 添加自定义 style.css 文件
-        base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
-        custom_css_src = base_dir / 'style.css'
-        if custom_css_src.exists():
-            shutil.copy2(custom_css_src, css_target_dir / 'style.css')
-            try:
-                temp_style = getattr(self, 'temp_style_content', '')
-                if temp_style.strip():
-                    open(css_target_dir / 'style.css', "a", encoding="utf-8").write("\n" + temp_style)
-                    logger.info("已追加临时样式到 style.css")
-                else:
-                    logger.debug("临时样式为空，未追加")
-                logger.success("添加style.css 完成")
-            except Exception as e:
-                logger.error(f"[DEBUG] 获取临时样式内容失败: {e}")
-        # 6. 在所有 XHTML 文件中添加样式表链接并清理样式
-        xhtml_count = 0
-        for file_path in temp_dir.rglob("*"):
-            if file_path.suffix.lower() not in ('.xhtml', '.html'):
-                continue
-            soup = BeautifulSoup(file_path.read_text(encoding='utf-8'), 'html.parser')
-            # 清理样式、viewport、js脚本
-            [tag.decompose() for tag in soup.select('style, link[rel="stylesheet"], meta, script')]
-            css_rel_xhtml = os.path.relpath(css_target_dir / 'style.css', file_path.parent).replace('\\', '/')
-            if head := soup.find('head'):
-                head.append(soup.new_tag('link', rel='stylesheet', type='text/css', href=css_rel_xhtml))
-            file_path.write_text(str(soup), encoding='utf-8')
-            xhtml_count += 1
-        logger.info(f"已更新 {xhtml_count} 个 XHTML 样式表链接")
+        if is_style_enabled:
+            # 1. 删除 page-progression-direction 属性
+            if (spine_tag := opf_soup.find('spine')) and 'page-progression-direction' in spine_tag.attrs:
+                del spine_tag.attrs['page-progression-direction']
+            # 2. 清理 OPF 文件中的 CSS 引用
+            for item in opf_soup.find_all('item', attrs={'media-type': 'text/css'}):
+                item.decompose()
+            # 3. 添加自定义样式表到 OPF 清单
+            opf_dir = opf_path.parent
+            css_target_dir = opf_dir / 'css'
+            os.makedirs(css_target_dir, exist_ok=True)
+            logger.debug(f"确保 CSS 目标目录存在: {css_target_dir}")
+            if manifest_tag := opf_soup.find('manifest'):
+                css_rel_path = (css_target_dir / 'style.css').relative_to(opf_dir).as_posix()
+                new_item = opf_soup.new_tag('item', href=css_rel_path, id='style-css', **{'media-type': 'text/css'})
+                manifest_tag.append(new_item)
+                logger.debug(f"已添加自定义样式表引用到 OPF 清单: {css_rel_path}")
+            # 4. 删除所有原 CSS 文件
+            deleted = 0
+            for css_file in temp_dir.rglob('*.css'):
+                css_file.unlink()
+                deleted += 1
+            logger.debug(f"已删除 {deleted} 个原 CSS 文件")
+            # 5. 添加自定义 style.css 文件
+            base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
+            custom_css_src = base_dir / 'style.css'
+            if custom_css_src.exists():
+                shutil.copy2(custom_css_src, css_target_dir / 'style.css')
+                try:
+                    temp_style = getattr(self, 'temp_style_content', '')
+                    if temp_style.strip():
+                        (css_target_dir / 'style.css').open("a", encoding="utf-8").write(f"\n{temp_style}")
+                        logger.info("已追加临时样式到 style.css")
+                    else:
+                        logger.debug("临时样式为空，未追加")
+                    logger.success("添加style.css 完成")
+                except Exception as e:
+                    logger.error(f"[DEBUG] 获取临时样式内容失败: {e}")
+            # 6. 在所有 XHTML 文件中添加样式表链接并清理样式
+            xhtml_count = 0
+            for file_path in temp_dir.rglob("*"):
+                if file_path.suffix.lower() not in ('.xhtml', '.html'):
+                    continue
+                soup = BeautifulSoup(file_path.read_text(encoding='utf-8'), 'html.parser')
+                # 清理样式、viewport、js脚本
+                [tag.decompose() for tag in soup.select('style, link[rel="stylesheet"], meta, script')]
+                css_rel_xhtml = os.path.relpath(css_target_dir / 'style.css', file_path.parent).replace('\\', '/')
+                if head := soup.find('head'):
+                    head.append(soup.new_tag('link', rel='stylesheet', type='text/css', href=css_rel_xhtml))
+                file_path.write_text(str(soup), encoding='utf-8')
+                xhtml_count += 1
+            logger.info(f"已更新 {xhtml_count} 个 XHTML 样式表链接")
+        if is_lang_enabled or is_style_enabled:
+            opf_path.write_text(str(opf_soup), encoding='utf-8')
 
     def merge_xhtml_files(self, temp_dir):
         logger.info("章节间Xhtml合并(基于目录)")
