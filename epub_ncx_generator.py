@@ -1,5 +1,6 @@
 import re
 import uuid
+import shutil
 from pathlib import Path
 from bs4 import BeautifulSoup
 from loguru import logger
@@ -10,31 +11,33 @@ class EpubNCXGenerator:
         """基于nav文件生成精确的NCX目录"""
         try:
             opf_dir = Path(opf_path).parent
-            ncx_path = opf_dir / 'toc.ncx'
-            nav_path = EpubNCXGenerator._find_nav_path(opf_path)
-            if ncx_path.exists():
-                EpubNCXGenerator._update_opf_reference(opf_path)
+            paths = EpubNCXGenerator._find_nav_path(opf_path)
+            nav_path, ncx_path = paths['nav'], paths['ncx']
+            target_ncx = opf_dir / 'toc.ncx'
+
+            if ncx_path:
+                # 存在ncx则确保在opf根目录下并且名称为toc
+                if ncx_path.resolve() != target_ncx.resolve(): shutil.move(ncx_path, target_ncx)
+                logger.debug(f"已将ncx移动到根目录: {target_ncx}")
+                EpubNCXGenerator._update_opf_reference(opf_path, 'toc.ncx')
                 EpubNCXGenerator.fix_ncx_paths(opf_path)
                 logger.info("toc.ncx已存在，已确保OPF引用和spine跟ncx内路径正确")
                 return True, "toc.ncx已存在，已确保OPF引用和spine跟ncx内路径正确"
-            if not nav_path:
-                logger.error("未找到有效的nav文件")
-                return False, "未找到有效的NAV文件"
-            # 解析NAV文件获取目录结构
-            toc_entries = EpubNCXGenerator._parse_nav(nav_path, opf_dir)
-            # 生成NCX内容
-            uid = EpubNCXGenerator._get_uid_from_opf(opf_path)
-            book_title = EpubNCXGenerator._get_book_title_from_opf(opf_path)
-            
-            with open(ncx_path, 'w', encoding='utf-8') as f:
-                f.write(EpubNCXGenerator._create_ncx_content(uid, toc_entries, book_title))
 
-            # 更新OPF引用跟检查ncx内路径正确
-            EpubNCXGenerator._update_opf_reference(opf_path)
-            EpubNCXGenerator.fix_ncx_paths(opf_path)
-            
-            logger.success("ncx生成成功（基于nav）")
-            return True, "ncx生成成功（基于nav）"
+            if nav_path:
+                # 不存在ncx,解析nav文件获取目录结构并创建toc
+                toc_entries = EpubNCXGenerator._parse_nav(nav_path, opf_dir)
+                uid = EpubNCXGenerator._get_uid_from_opf(opf_path)
+                book_title = EpubNCXGenerator._get_book_title_from_opf(opf_path)
+                with open(target_ncx, 'w', encoding='utf-8') as f:
+                    f.write(EpubNCXGenerator._create_ncx_content(uid, toc_entries, book_title))
+                EpubNCXGenerator._update_opf_reference(opf_path, 'toc.ncx')
+                EpubNCXGenerator.fix_ncx_paths(opf_path)
+                logger.success("ncx生成成功（基于nav）")
+                return True, "ncx生成成功（基于nav）"
+
+            logger.error("未找到有效的nav跟ncx文件")
+            return False, "未找到有效的nav跟ncx文件"
         except Exception as e:
             logger.error(f"ncx生成失败: {str(e)}")
             return False, f"ncx生成失败: {str(e)}"
@@ -120,24 +123,23 @@ class EpubNCXGenerator:
 
     @staticmethod
     def _find_nav_path(opf_path):
-        """查找nav导航文件路径"""
+        """查找nav和ncx文件路径 返回dict"""
         with open(opf_path, 'r', encoding='utf-8') as f:
             opf_soup = BeautifulSoup(f.read(), 'xml')
-        # 查找EPUB3导航文件
-        nav_item = opf_soup.find('item', {'properties': 'nav'})
-        # 查找EPUB2 NCX文件
-        if not nav_item:
-            nav_item = opf_soup.find('item', {'media-type': 'application/x-dtbncx+xml'})
-        if not nav_item:
-            return None
         opf_dir = Path(opf_path).parent
-        nav_href = nav_item.get('href', '')
-        nav_path = (opf_dir / nav_href).resolve()
-        # 验证文件存在性
-        if not nav_path.exists():
-            logger.warning(f"nav导航文件不存在 {nav_path}")
-            return None
-        return nav_path
+        items = {
+            'nav': opf_soup.find('item', {'properties': 'nav'}),
+            'ncx': opf_soup.find('item', {'media-type': 'application/x-dtbncx+xml'})
+        }
+        result = {}
+        for k, item in items.items():
+            path = (opf_dir / item['href']).resolve() if item and item.get('href') else None
+            if path and path.exists():
+                result[k] = path
+            else:
+                if path: logger.warning(f"{k}文件不存在 {path}")
+                result[k] = None
+        return result
 
     @staticmethod
     def _parse_nav(nav_path, base_dir):
@@ -235,31 +237,20 @@ class EpubNCXGenerator:
         return id_tag.text.strip() if id_tag and id_tag.text else f'urn:uuid:{uuid.uuid4()}'
 
     @staticmethod
-    def _update_opf_reference(opf_path):
+    def _update_opf_reference(opf_path, ncx_href='toc.ncx'):
         """更新OPF中的NCX引用"""
         with open(opf_path, 'r', encoding='utf-8') as f:
             opf_soup = BeautifulSoup(f.read(), 'xml')
-        
         # 移除旧NCX引用
-        for item in opf_soup.find_all('item', {'media-type': 'application/x-dtbncx+xml'}):
-            item.decompose()
-        
+        [item.decompose() for item in opf_soup.find_all('item', {'media-type': 'application/x-dtbncx+xml'})]
         # 添加新NCX引用
         manifest = opf_soup.find('manifest')
-        new_item = opf_soup.new_tag(
-            'item',
-            attrs={  # 使用 attrs 参数明确指定属性字典
-                'id': 'ncx',
-                'href': 'toc.ncx',
-                'media-type': 'application/x-dtbncx+xml'  # 直接定义带连字符的属性名
-            }
-        )
-        manifest.append(new_item)
-
+        manifest.append(opf_soup.new_tag('item', attrs={
+            'id': 'ncx', 'href': ncx_href, 'media-type': 'application/x-dtbncx+xml'
+        }))
         # 更新spine属性
-        if spine := opf_soup.find('spine'):
-            spine['toc'] = 'ncx'
-
+        spine = opf_soup.find('spine')
+        if spine: spine['toc'] = 'ncx'
         with open(opf_path, 'w', encoding='utf-8') as f:
             f.write(str(opf_soup))
 
@@ -272,60 +263,54 @@ class EpubNCXGenerator:
         id_to_href = {item['id']: item['href'] for item in manifest.find_all('item') if item.has_attr('id') and item.has_attr('href')}
         spine_files = [id_to_href[itemref['idref']] for itemref in opf_soup.find('spine').find_all('itemref') if itemref['idref'] in id_to_href]
         ncx_item = manifest.find('item', {'media-type': 'application/x-dtbncx+xml'})
-        if not ncx_item or not ncx_item.get('href'): return False
+        if not ncx_item or not ncx_item.get('href'): return False, "未找到NCX"
         ncx_path = (opf_path.parent / ncx_item['href']).resolve()
         ncx_text = ncx_path.read_text(encoding='utf-8')
-        changed = False
+        # 统一的状态标记，只要有任何改动就设为 True
+        any_changed = False 
+        # ---检查修正src路径---
         def replace_src(match):
+            nonlocal any_changed
             src = match.group(1)
             src_path, *anchor = src.split('#', 1)
-            src_name = Path(src_path).name
-            match_href = next((f for f in spine_files if Path(f).name == src_name), None)
+            match_href = next((f for f in spine_files if Path(f).name == Path(src_path).name), None)
             if match_href and match_href != src_path:
-                # 保留锚点
-                new_src = match_href + ('#' + anchor[0] if anchor else '')
-                logger.debug(f"修正ncx路径: {src} -> {new_src}")
-                nonlocal changed
-                changed = True
-                return f'src="{new_src}"'
+                any_changed = True
+                logger.debug(f"修正ncx路径: {src} -> {match_href}")
+                return f'src="{match_href + ("#" + anchor[0] if anchor else "")}"'
             return match.group(0)
-        new_ncx_text = re.sub(r'src="([^"]+)"', replace_src, ncx_text)
-        if changed:
-            ncx_path.write_text(new_ncx_text, encoding='utf-8')
+        ncx_text = re.sub(r'src="([^"]+)"', replace_src, ncx_text)
+        if any_changed:
             logger.success("ncx目录路径已修正")
-            ncx_text = new_ncx_text  # 用修正后的文本继续后续判断
 
-        # 判断最后一条目录文件是否存在，不存在则批量-1修正
+        # ---判断最后一条目录文件是否存在，不存在则批量-1修正---
         ncx_srcs = re.findall(r'src="([^"]+)"', ncx_text)
-        if not ncx_srcs:
-            logger.debug("ncx最后条目文件存在，无需偏移修正")
-            return True, "ncx最后条目文件存在"
-        last_src = ncx_srcs[-1].split('#', 1)[0]
-        last_file = (opf_path.parent / last_src)
-        html_hrefs = [item['href'] for item in manifest.find_all('item')
-                      if item.get('media-type') in ('text/html', 'application/xhtml+xml') and item.has_attr('href')]
-        if not last_file.exists():
-            # 取最后一条的title
-            soup = BeautifulSoup(ncx_text, 'xml')
-            last_title = (nav_points := soup.find_all('navPoint')) and (nav_label := nav_points[-1].find('navLabel')) and nav_label.text.strip() or ""
-            logger.warning(f"最后一条目录文件不存在 {last_title} | ({ncx_srcs[-1]}) 全部目录批量-1修正")
-            offset_changed = False
-            def offset_replace_src(match):
-                src = match.group(1)
-                src_path, *anchor = src.split('#', 1)
-                try:
-                    idx = html_hrefs.index(src_path)
-                    new_href = html_hrefs[idx-1] if idx > 0 else src_path
-                except ValueError:
-                    new_href = html_hrefs[-1] if src_path == last_src and html_hrefs else src_path
-                if new_href == src_path: return match.group(0)
-                nonlocal offset_changed
-                offset_changed = True
-                return f'src="{new_href + ("#" + anchor[0] if anchor else "")}"'
-            offset_ncx_text = re.sub(r'src="([^"]+)"', offset_replace_src, ncx_text)
-            if offset_changed:
-                ncx_path.write_text(offset_ncx_text, encoding='utf-8')
-                return True, "ncx目录已批量-1修正"
-            return True, "ncx目录无需批量-1修正"
-        logger.debug("ncx目录路径无需修正")
-        return True, "ncx目录路径无需修正"
+        if ncx_srcs:
+            last_src = ncx_srcs[-1].split('#', 1)[0]
+            if not (opf_path.parent / last_src).exists():
+                soup = BeautifulSoup(ncx_text, 'xml')
+                nav_points = soup.find_all('navPoint')
+                last_title = nav_points[-1].find('navLabel').text.strip() if nav_points else ""
+                logger.warning(f"最后一条目录文件不存在 {last_title} | ({ncx_srcs[-1]}) 全部目录批量-1修正")
+                html_hrefs = [item['href'] for item in manifest.find_all('item')
+                              if item.get('media-type') in ('text/html', 'application/xhtml+xml') and item.has_attr('href')]
+                def offset_replace_src(match):
+                    nonlocal any_changed
+                    src_path, *anchor = match.group(1).split('#', 1)
+                    try:
+                        idx = html_hrefs.index(src_path)
+                        new_href = html_hrefs[idx-1] if idx > 0 else src_path
+                    except ValueError:
+                        new_href = html_hrefs[-1] if src_path == last_src else src_path
+                    
+                    if new_href != src_path:
+                        any_changed = True
+                        return f'src="{new_href + ("#" + anchor[0] if anchor else "")}"'
+                    return match.group(0)
+                ncx_text = re.sub(r'src="([^"]+)"', offset_replace_src, ncx_text)
+        if any_changed:
+            ncx_path.write_text(ncx_text, encoding='utf-8')
+            return True, "目录-1修正完成"
+        # 只有在 any_changed 依旧为 False 时才显示此日志
+        logger.debug("ncx无需修正")
+        return True, "ncx无需修正"
