@@ -65,26 +65,21 @@ class EpubNCXGenerator:
             opf_path.write_text(content, encoding='utf-8')
             soup = BeautifulSoup(content, 'xml')
             nav_item = soup.find('item', properties='nav')
+            # 寻找 EPUB 根目录（包含 mimetype 文件的目录，若无则默认为 OPF 所在目录）
+            epub_root = next((p for p in opf_path.parents if (p / 'mimetype').exists()), opf_path.parent)
+
+            # 递归删除 EPUB 根目录下所有 .bw 和 .js 文件
+            for ext in ['*.bw', '*.js']:
+                for extra_file in epub_root.rglob(ext):
+                    extra_file.unlink()
+                    logger.debug(f"已删除 {extra_file.suffix[1:]} 文件: {extra_file}")
+
+            # 处理 nav_item 的物理删除与条目移除
             if nav_item:
                 nav_path = opf_path.parent / nav_item['href']
                 if nav_path.exists():
                     nav_path.unlink()
                     logger.debug(f"已删除 nav 文件: {nav_path}")
-                # 寻找epub根目录（包含mimetype文件的目录）
-                epub_root = opf_path.parent
-                for parent in opf_path.parents:
-                    if (parent / 'mimetype').exists():
-                        epub_root = parent
-                        break
-                # 递归删除epub根目录下所有 .bw 文件
-                for bw_file in epub_root.rglob('*.bw'):
-                    bw_file.unlink()
-                    logger.debug(f"已删除 .bw 文件: {bw_file}")
-                # 递归删除epub根目录下所有 .js 文件
-                for js_file in epub_root.rglob('*.js'):
-                    js_file.unlink()
-                    logger.debug(f"已删除 js 文件: {js_file}")
-                # 从manifest中移除nav的item
                 nav_item.decompose()
                 logger.debug("已从OPF manifest中移除nav条目")
             # 查找manifest中cover图片item（优先 properties="cover-image" 的item）
