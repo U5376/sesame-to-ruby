@@ -187,24 +187,7 @@ class EpubNCXGenerator:
                     if child_depth > max_depth:
                         max_depth = child_depth
             return max_depth
-        def build_nav_points(entries, parent_id=None):
-            nonlocal play_order
-            points = []
-            for entry in entries:
-                point_id = f"navPoint-{play_order}"
-                nav_point = f'''
-                <navPoint id="{point_id}" playOrder="{play_order}">
-                    <navLabel><text>{entry['title']}</text></navLabel>
-                    <content src="{entry['href']}"/>'''
-                play_order += 1
-                if entry['children']:
-                    child_points = build_nav_points(entry['children'], point_id)
-                    nav_point += f'\n{"".join(child_points)}\n</navPoint>'
-                else:
-                    nav_point += '\n</navPoint>'
-                points.append(nav_point)
-            return points
-        nav_points = build_nav_points(toc_entries)
+        nav_points = EpubNCXGenerator._build_ncx_points(toc_entries)
         max_depth = calculate_max_depth(toc_entries) if toc_entries else 1
         return f'''<?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
@@ -222,6 +205,25 @@ class EpubNCXGenerator:
     {"".join(nav_points)}
     </navMap>
     </ncx>'''
+
+    @staticmethod
+    def _build_ncx_points(entries, play_order_start=1):
+        play_order = play_order_start
+        points = []
+        for entry in entries:
+            point_id = f"navPoint-{play_order}"
+            nav_point = f'''
+            <navPoint id="{point_id}" playOrder="{play_order}">
+                <navLabel><text>{entry['title']}</text></navLabel>
+                <content src="{entry['href']}"/>'''
+            play_order += 1
+            if entry.get('children'):
+                child_points = EpubNCXGenerator._build_ncx_points(entry['children'], play_order)
+                nav_point += f'\n{"".join(child_points)}\n</navPoint>'
+            else:
+                nav_point += '\n</navPoint>'
+            points.append(nav_point)
+        return points
 
     @staticmethod
     def _get_uid_from_opf(opf_path):
