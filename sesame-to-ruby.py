@@ -323,13 +323,13 @@ class EpubProcessor:
         for e in toc:
             href = e.get('href') or ''
             title = e.get('title', '无标题')
-            if ((title, href) in (ex := self.excluded_toc_entries) or any(title == t for t, _ in ex) or (title, href.split('#')[0]) in ex):
-                logger.debug(f"跳过排除的目录条目: {title} | ({href})"); continue
+            is_ex = (title, href) in (ex := self.excluded_toc_entries) or any(title == t for t, _ in ex) or (title, href.split('#')[0]) in ex
+            if is_ex: logger.debug(f"跳过排除的目录条目: {title} | ({href})")
             f = (opf_dir / href.split('#', 1)[0]).resolve()
             if not f.exists(): logger.warning(f"目录条目文件不存在，已跳过: {title} | ({href})"); continue
             try: idx = spine_files.index(f)
             except ValueError: logger.warning(f"目录条目路径对照spine列表异常: {title} | ({href})"); continue
-            toc_anchors.append((idx, title, f))
+            toc_anchors.append((idx, title, f, is_ex)) # 将标记存入
         if not toc_anchors: return logger.warning("未找到有效目录，跳过合并")
 
         toc_anchors.sort(key=lambda x:x[0])
@@ -337,7 +337,8 @@ class EpubProcessor:
         tags=[]if sep=='-'else(['p','hr','p']if sep=='hr+br'else['p']*(int(sep[0])if sep.endswith('br')and sep[0].isdigit()else 2))
 
         modified=False
-        for i,(s,_,m) in enumerate(toc_anchors):
+        for i,(s,_,m,is_ex) in enumerate(toc_anchors):
+            if is_ex: continue # 仅作为合并边界 不作为发起者合并后续章节
             g=spine_files[s:(toc_anchors[i+1][0] if i+1<len(toc_anchors) else len(spine_files))]
             if len(g)<2: continue
             logger.debug(f"合并于: {g[0].relative_to(temp_dir).as_posix()} 已合并: {[x.relative_to(temp_dir).as_posix() for x in g[1:]]}")
