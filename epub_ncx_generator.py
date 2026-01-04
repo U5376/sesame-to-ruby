@@ -265,21 +265,8 @@ class EpubNCXGenerator:
         paths = EpubNCXGenerator._find_nav_path(opf_path)
         nav_path, ncx_path, any_changed = paths.get('nav'), paths.get('ncx'), False
 
-        # 寻找唯一 あとがき 文件 (Body前20行内且全书唯一的HTML)
-        candidates = [
-            h for h in spine_files 
-            if (f := opf_path.parent / h).exists() 
-            and (c := f.read_text(encoding='utf-8', errors='ignore'))
-            # 提取 body 后前 20 行
-            and (m := re.search(r'<body[^>]*>([\s\S]*)$', c, re.I))
-            and (zone := "\n".join(m.group(1).splitlines()[:20]))
-            # 匹配逻辑：匹配任何标签内包含 あとがき 的行 (兼容独立标题和描述性标题)
-            and re.search(r'<[^>]+>[^<]*あとがき[^<]*</[^>]+>', zone)
-        ]
-        # 确保全书满足上述条件的 HTML 文件有且仅为一个
-        atokagi_file = candidates[0] if len(candidates) == 1 else None
-
         # 修正ncx (合并写入逻辑：路径修正 + 批量偏移 + 补全 あとがき)
+        ncx_text = None
         if ncx_path and ncx_path.exists():
             ncx_text = ncx_path.read_text(encoding='utf-8')
             
@@ -308,31 +295,51 @@ class EpubNCXGenerator:
                     return f'src="{n_h}{"#" + anc[0] if anc else ""}"'
                 ncx_text = re.sub(r'src="([^"]+)"', offset_src, ncx_text)
 
-            # 补全ncx あとがき条目 (保留空条目并修复索引)
-            if atokagi_file and 'あとがき' not in ncx_text and (m_nav := re.search(r'(<navMap>)(.*?)(</navMap>)', ncx_text, re.DOTALL)):
-                def get_idx(h): 
-                    if not h: return -1
-                    c_h = h.split('#')[0]
-                    return spine_files.index(c_h) if c_h in spine_files else next((i for i, f in enumerate(spine_files) if Path(f).name == Path(c_h).name), -1)
+        # 只有在 ncx 或 nav 确实缺失“あとがき”条目时 才寻找あとがき文件
+        ncx_missing = ncx_text and 'あとがき' not in ncx_text
+        nav_missing = nav_path and nav_path.exists() and 'あとがき' not in (nav_content := nav_path.read_text(encoding='utf-8'))
+        atokagi_file = None
 
-                pts = re.findall(r'<navPoint[\s\S]*?</navPoint>', m_nav.group(2))
-                entries = [{'title': (re.search(r'<text[^>]*>(.*?)</text>', p, re.DOTALL) or [0, ""])[1].strip(),
-                            'href': (re.search(r'src="([^"]+)"', p) or [0, ""])[1]} for p in pts]
-                
-                a_idx = spine_files.index(atokagi_file)
-                ins_pos = next((i for i, e in enumerate(entries) if e['href'] and get_idx(e['href']) > a_idx), len(entries))
-                entries.insert(ins_pos, {'title': 'あとがき', 'href': atokagi_file, 'children': []})
-                
-                ncx_text = ncx_text[:m_nav.start(2)] + "\n" + "".join(EpubNCXGenerator._build_ncx_points(entries, 1)) + "\n" + ncx_text[m_nav.end(2):]
-                any_changed = True
-                logger.success(f"ncx 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
+        # 寻找唯一 あとがき 文件 (Body前20行内且全书唯一的HTML)
+        if ncx_missing or nav_missing:
+            candidates = [
+                h for h in spine_files 
+                if (f := opf_path.parent / h).exists() 
+                and (c := f.read_text(encoding='utf-8', errors='ignore'))
+                # 提取 body 后前 20 行
+                and (m := re.search(r'<body[^>]*>([\s\S]*)$', c, re.I))
+                and (zone := "\n".join(m.group(1).splitlines()[:20]))
+                # 匹配逻辑：匹配任何标签内包含 あとがき 的行 (兼容独立标题和描述性标题)
+                and re.search(r'<[^>]+>[^<]*あとがき[^<]*</[^>]+>', zone)
+            ]
+            # 确保全书满足上述条件的 HTML 文件有且仅为一个
+            atokagi_file = candidates[0] if len(candidates) == 1 else None
 
-            if any_changed: ncx_path.write_text(ncx_text, encoding='utf-8')
+        # 补全ncx あとがき条目 (保留空条目并修复索引)
+        if ncx_text and atokagi_file and ncx_missing and (m_nav := re.search(r'(<navMap>)(.*?)(</navMap>)', ncx_text, re.DOTALL)):
+            def get_idx(h): 
+                if not h: return -1
+                c_h = h.split('#')[0]
+                return spine_files.index(c_h) if c_h in spine_files else next((i for i, f in enumerate(spine_files) if Path(f).name == Path(c_h).name), -1)
+
+            pts = re.findall(r'<navPoint[\s\S]*?</navPoint>', m_nav.group(2))
+            entries = [{'title': (re.search(r'<text[^>]*>(.*?)</text>', p, re.DOTALL) or [0, ""])[1].strip(),
+                        'href': (re.search(r'src="([^"]+)"', p) or [0, ""])[1]} for p in pts]
+            
+            a_idx = spine_files.index(atokagi_file)
+            ins_pos = next((i for i, e in enumerate(entries) if e['href'] and get_idx(e['href']) > a_idx), len(entries))
+            entries.insert(ins_pos, {'title': 'あとがき', 'href': atokagi_file, 'children': []})
+            
+            ncx_text = ncx_text[:m_nav.start(2)] + "\n" + "".join(EpubNCXGenerator._build_ncx_points(entries, 1)) + "\n" + ncx_text[m_nav.end(2):]
+            any_changed = True
+            logger.success(f"ncx 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
+
+        if any_changed and ncx_path: ncx_path.write_text(ncx_text, encoding='utf-8')
 
         # 补全nav あとがき条目
-        if nav_path and nav_path.exists() and atokagi_file:
-            nav_soup = BeautifulSoup(nav_path.read_text(encoding='utf-8'), 'html.parser')
-            if (toc := nav_soup.find('nav', {'epub:type': 'toc'}) or nav_soup.find('nav', {'role': 'doc-toc'})) and 'あとがき' not in toc.get_text() and (root := toc.find(['ol', 'ul'])):
+        if nav_missing and atokagi_file:
+            nav_soup = BeautifulSoup(nav_content, 'html.parser')
+            if (toc := nav_soup.find('nav', {'epub:type': 'toc'}) or nav_soup.find('nav', {'role': 'doc-toc'})) and (root := toc.find(['ol', 'ul'])):
                 a_idx = spine_files.index(atokagi_file)
                 lis = root.find_all('li', recursive=False)
                 ins = next((li for li in lis if (a := li.find('a', href=True)) and (h := a['href'].split('#')[0]) in spine_files and spine_files.index(h) > a_idx), None)
