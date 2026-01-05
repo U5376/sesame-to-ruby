@@ -241,10 +241,9 @@ class EpubProcessor:
         lang_val = set_var.get().strip() if set_var and hasattr(set_var, 'get') and set_var.get().strip() else "ja"
 
         if is_lang_enabled:
-            if lang_tag := opf_soup.find('dc:language'):
-                logger.info(f"原始语言标识 {' '.join(lang_tag.string.split())} 已修改为 {lang_val}"); lang_tag.string = lang_val
-            elif meta := opf_soup.find('metadata'):
-                meta.append(opf_soup.new_tag('dc:language', string=lang_val))
+            tag = opf_soup.find('dc:language') or (opf_soup.metadata.append(opf_soup.new_tag('dc:language')) or opf_soup.find('dc:language'))
+            orig = ' '.join(tag.string.split()) if tag.string else "未定义"
+            tag.string = lang_val; logger.info(f"语言标识：{orig} -> {lang_val}")
 
         if is_style_enabled:
             # 1. 清理 OPF 属性与 CSS 引用
