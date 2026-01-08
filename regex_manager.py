@@ -60,7 +60,7 @@ class RegexManager:
         btn_frame = tk.Frame(self.frame)
         btn_frame.pack(fill=tk.X, pady=3)
         [tk.Button(btn_frame, text=t, command=c, font=("宋体", 12)).pack(side=tk.LEFT, padx=2)
-         for t, c in [("添加正则", self.add_entry), ("保存设置", self.save_config)]]
+         for t, c in [("添加正则", self.add_entry), ("保存设置", None)]]
         # 配置文件下拉框，限制宽度为20
         ini_menu = ttk.Combobox(btn_frame, textvariable=self.selected_ini, values=[], state="readonly", font=("宋体", 12), width=11)
         ini_menu.pack(side=tk.LEFT, padx=2)
@@ -112,17 +112,13 @@ class RegexManager:
         logger.add(sys.stderr, level=level.upper())
         logger.log(level.upper(), "日志级别: {}", level)
 
-    def save_config(self):
-        """空实现，主程序会重绑定按钮为实际保存方法"""
-        pass
-
     def load_config(self, config_path=None):
         if config_path:
             self.config_file = Path(config_path)
         # 清空UI（防止重复加载）
         [entry[2].destroy() for entry in getattr(self, 'regex_entries', []) if hasattr(entry[2], 'destroy')]
         self.regex_entries, self.tooltips = [], []
-        self._load_from_ini() if self.config_file.exists() else (self._create_default_rules(), self.save_config())
+        self._load_from_ini() if self.config_file.exists() else (self._create_default_rules())
         self._init_ini_files()
         # 保持下拉框选中项同步
         if hasattr(self, 'ini_names') and hasattr(self, 'ini_menu'):

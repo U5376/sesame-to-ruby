@@ -117,13 +117,13 @@ class EpubProcessor:
         self.load_app_settings()
 
         self.regex_manager = RegexManager(root, config_path=self.config_file, parent=self)
-        self._bind_regex_save_button()
+        self._save_config()
 
         # 拖拽支持
         self.root.drop_target_register(DND_FILES)
         self.root.dnd_bind('<<Drop>>', self._on_drop_epub)
 
-    def _bind_regex_save_button(self):
+    def _save_config(self):
         """将正则管理器的保存按钮绑定为主程序保存方法"""
         [btn.config(command=self.save_app_settings)
         for child in self.regex_manager.frame.winfo_children() if isinstance(child, tk.Frame)
