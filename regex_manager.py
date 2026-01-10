@@ -27,7 +27,7 @@ class RegexManager:
         self.config_file = Path(config_path)
         self.regex_entries = []
         self.tooltips = []
-        self.log_level_var = log_level_var  # 新增
+        self.set_log_level(log_level_var.get()) if (setattr(self, 'log_level_var', log_level_var) or log_level_var) else None
         self.ini_files = []  # 所有ini文件列表
         self.selected_ini = tk.StringVar(value=str(self.config_file))  # 当前选中的ini文件
         self.parent = parent  # 主程序对象
@@ -69,13 +69,11 @@ class RegexManager:
         self._init_ini_files()
 
         # 日志级别下拉框
-        log_level_var = tk.StringVar(btn_frame); log_level_var.set("info")
-        log_levels = ["info", "debug"]
-        log_level_menu = ttk.Combobox(btn_frame, textvariable=log_level_var, values=log_levels, state="readonly", font=("宋体", 12), width=5)
-        log_level_menu.pack(side=tk.LEFT, padx=2)
-        log_level_menu.bind("<<ComboboxSelected>>", lambda e: self.set_log_level(log_level_var.get()))
-        # 初始化时设置日志级别
-        self.set_log_level("info")
+        self.log_level_var = getattr(self, 'log_level_var', None) or tk.StringVar(value="info")
+        cb = ttk.Combobox(btn_frame, textvariable=self.log_level_var, values=["info", "debug"], 
+                        width=5, state="readonly", font=("宋体", 12))
+        cb.pack(side=tk.LEFT, padx=2)
+        cb.bind("<<ComboboxSelected>>", lambda e: self.set_log_level(self.log_level_var.get(), show_log=True))
         # ====== 可滚动条目区（canvas + inner_frame） ======
         self.scroll_container = tk.Frame(self.frame); self.scroll_container.pack(fill=tk.BOTH, expand=True)
         self.canvas = tk.Canvas(self.scroll_container, borderwidth=0, highlightthickness=0)
@@ -106,11 +104,11 @@ class RegexManager:
         self._add_ini_menu_manage()
 
 
-    def set_log_level(self, level):
+    def set_log_level(self, level, show_log=False):
         """设置日志级别"""
         logger.remove()
         logger.add(sys.stderr, level=level.upper())
-        logger.log(level.upper(), "日志级别: {}", level)
+        if show_log: logger.log(level.upper(), "日志级别: {}", level)
 
     def load_config(self, config_path=None):
         if config_path:

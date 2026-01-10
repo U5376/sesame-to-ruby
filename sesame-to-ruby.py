@@ -114,9 +114,10 @@ class EpubProcessor:
         # 配置路径
         base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
         self.config_file = base_dir / "config.ini"
+        self.log_level_var = self._settings_vars_dict.setdefault('log_level', tk.StringVar(value="info"))
         self.load_app_settings()
 
-        self.regex_manager = RegexManager(root, config_path=self.config_file, parent=self)
+        self.regex_manager = RegexManager(root, self.config_file, self.log_level_var, self)
         self._save_config()
 
         # 拖拽支持
@@ -810,9 +811,10 @@ class EpubProcessor:
             if 'AppSettings' in config:
                 [var.set(config['AppSettings'].getboolean(name)) if isinstance(var, tk.BooleanVar) else var.set(config['AppSettings'][name])
                  for name, var in self._settings_vars_dict.items() if name in config['AppSettings']]
-            logger.info(f"设置已加载: {self.config_file}")
+            hasattr(self, 'regex_manager') and self.regex_manager.set_log_level(self.log_level_var.get())
+            logger.info(f"加载配置:[{self.log_level_var.get()}] {self.config_file}")
         except Exception as e:
-            logger.error(f"加载设置失败: {e}")
+            logger.error(f"加载配置失败: {e}")
 
     def reset_app_settings(self):
         """重置所有设置为控件默认值，并重置正则规则"""
