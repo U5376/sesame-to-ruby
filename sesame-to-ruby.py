@@ -70,19 +70,22 @@ class EpubProcessor:
                 ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, '删除指定的空行数量'),
                 ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
             ('delete_style_enabled', '删除自带Style并添加自定义样式表', '清理原有样式跟opf竖排属性\n添加css文件及更新引用\n规格化头部信息', []),
-            ('generate_ncx_enabled', '生成ncx并更新opf', '自动对照opf列表修正路径\n最后一条目录文件不存在进行-1顺序修正', []),
+            ('generate_ncx_enabled', '生成ncx并更新opf', '自动对照opf列表修正路径', [
+                ('ncx_offset_enabled', '-1修正', tk.Checkbutton, {'px': (10, 0)}, '最后一条目录文件不存在进行-1顺序修正'),
+                ('ncx_atokagi_enabled', '补充后记', tk.Checkbutton, {'px': (2, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
             ('convert_epub_version_enabled', '转Epub2.0并删除nav.xhtml', '将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明', []),
             ('convert_images_var', '转换图片', '图片转换设置', [
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
                  ('-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n'
                   '-s 锐化 默认1.0不处理\n-A 保留透明通道Alpha\n-w 线程数\n-m WebP压缩等级 1-6'))]),
-            ('set_lang_enabled', '语言标识', '手动更改dc:language', [('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN')]),
+            ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN')]),
         ]
         # 1.变量初始化
         for k, _, _, ex in self.CFG:
             v = tk.BooleanVar(value=True); self._settings_vars_dict[k] = v; setattr(self, k, v)
-            for ek, ev, _, _, _ in ex:
-                ev_var = tk.StringVar(value=ev); self._settings_vars_dict[ek] = ev_var; setattr(self, ek, ev_var)
+            for ek, ev, cls, _, _ in ex:
+                var = (tk.BooleanVar(value=True) if cls == tk.Checkbutton else tk.StringVar(value=ev))
+                self._settings_vars_dict[ek] = var; setattr(self, ek, var)
         # 2.布局
         f_scroll = tk.Frame(root); f_scroll.pack(fill=tk.X, padx=(1, 0), pady=0)
         cvs = tk.Canvas(f_scroll, highlightthickness=0)
@@ -98,18 +101,16 @@ class EpubProcessor:
             cvs.itemconfig(win, width=cvs.winfo_width())]
         cvs.bind('<Configure>', _u); root.after(10, _u)
         # 3.渲染逻辑
-        for i, (k, txt, tip, extras) in enumerate(self.CFG):
-            row = tk.Frame(self.inner); row.pack(fill=tk.X, anchor='w', pady=0)
+        for k, txt, tip, extras in self.CFG:
+            row = tk.Frame(self.inner); row.pack(fill=tk.X, anchor='w')
             cb = tk.Checkbutton(row, text=txt, variable=self._settings_vars_dict[k], font=FONT)
-            cb.pack(side=tk.LEFT, padx=0); ToolTip(cb, text=tip)
-            for ek, _, cls, kw, etip in extras:
-                if kw.get('sticky') == 'ew': # 图片转换 Entry 逻辑
-                    w = cls(row, textvariable=self._settings_vars_dict[ek], font=FONT)
-                    w.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=0)
-                else:
-                    w = cls(row, textvariable=self._settings_vars_dict[ek], width=kw.get('w'), font=FONT, **({'values': kw.get('val'), 'state': 'readonly'} if cls==ttk.Combobox else {}))
-                    w.pack(side=tk.LEFT, padx=kw.get('px', 0))
-                ToolTip(w, text=etip)
+            cb.pack(side=tk.LEFT); ToolTip(cb, text=tip)
+            for ek, et, cls, kw, etp in extras:
+                cfg = {'variable' if cls==tk.Checkbutton else 'textvariable': self._settings_vars_dict[ek], 'font': FONT}
+                if cls == tk.Checkbutton: cfg['text'] = et
+                else: cfg.update({'width': kw.get('w'), **({'values': kw.get('val'), 'state': 'readonly'} if cls==ttk.Combobox else {})})
+                w = cls(row, **cfg); ToolTip(w, text=etp)
+                w.pack(side=tk.LEFT, fill=(tk.X if kw.get('sticky')=='ew' else None), expand=(kw.get('sticky')=='ew'), padx=kw.get('px', 0))
 
         # 配置路径
         base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
