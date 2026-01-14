@@ -45,7 +45,7 @@ class EpubProcessor:
             ('开始转换', self.start_conversion, (0, 1), "转换加载的单个epub文件"),
             ('批量转换', self.batch_convert_epubs, (0, 2), "批量转换\n支持epub拖拽到按钮\n原名文件保存至output文件夹"),
             ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
-            ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目\n批量也能排除指定的章节名"),
+            ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目\n批量也能排除指定的章节名\n右键管理排除列表"),
             ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态"),
         ]
         for text, cmd, (row, col), tip in btn_cfgs:
@@ -55,8 +55,9 @@ class EpubProcessor:
             if text == '批量转换':
                 btn.drop_target_register(DND_FILES)
                 btn.dnd_bind('<<Drop>>', lambda e, self=self: self.root.after(100, lambda: self.batch_convert_epubs(
-                    [f for f in self.root.tk.splitlist(e.data) if f.lower().endswith('.epub')]))
-                )
+                    [f for f in self.root.tk.splitlist(e.data) if f.lower().endswith('.epub')])))
+            elif text == '排除合并':
+                btn.bind('<Button-3>', lambda e: self.show_exclude_list_dialog() if e.num == 3 else None)
 
         # 处理选项 滚动条区域
         self._settings_vars_dict = {}  # 自动收集所有设置变量
@@ -693,80 +694,88 @@ class EpubProcessor:
 
     def show_exclude_dialog(self):
         """章节合并排除对话框"""
-        if not hasattr(self, 'epub_path'):
-            messagebox.showwarning("警告", "请先选择EPUB文件")
-            return
-        # 创建临时目录解析EPUB
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir_path = Path(temp_dir)
-            with zipfile.ZipFile(self.epub_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-            # 获取并解析OPF文件
-            opf_path = self._get_opf_path(temp_dir_path)
-            EpubNCXGenerator.fix_ncx_paths(opf_path)
-            opf_content = opf_path.read_text(encoding='utf-8')
-            opf_soup = BeautifulSoup(opf_content, 'xml')
-            # 获取目录条目
-            toc_entries = self._parse_toc(opf_soup, opf_path)
-            if not toc_entries:
-                messagebox.showwarning("警告", "未找到目录条目")
-                return
-        # 创建选择对话框
-        dialog = tk.Toplevel(self.root)
-        dialog.title("选择不合并的目录条目")
-        dialog.geometry(f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}")
-        # 创建Treeview
-        tree_frame = ttk.Frame(dialog)
-        tree = ttk.Treeview(tree_frame, columns=("title", "href"), show="headings")
-        tree.heading("title", text="目录名称")
-        tree.heading("href", text="HTML文件")
-        tree.column("title", width=300)
-        tree.column("href", width=100)
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        # 填充目录条目
-        for entry in toc_entries:
-            title = entry.get('title', '无标题')
-            tree.insert("", "end", values=(title, entry['href']))
-        for child in tree.get_children():
-            if tree.item(child)['values'][1] in self.excluded_toc_entries:
-                tree.selection_add(child)
-        # 添加单击切换选中功能
-        def toggle_selection(event):
-            item = tree.identify_row(event.y)
-            if not item:
-                return
-            if item in tree.selection():
-                tree.selection_remove(item)
-            else:
-                tree.selection_add(item)
-            return "break"
-        tree.bind("<Button-1>", toggle_selection)
-        # 确认按钮
+        if not getattr(self, 'epub_path', None): return messagebox.showwarning("警告", "请先选择EPUB文件")
+        with tempfile.TemporaryDirectory() as td, zipfile.ZipFile(self.epub_path) as z:
+            z.extractall(td); opf = self._get_opf_path(Path(td))
+            m_off = self.ncx_manual_offset_val.get()
+            EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), m_off)
+            if not (toc := self._parse_toc(BeautifulSoup(opf.read_text('utf-8'), 'xml'), opf)):
+                return messagebox.showwarning("警告", "未找到目录条目")
+        d = tk.Toplevel(self.root); d.title("选择不合并的目录条目")
+        d.geometry(f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}")
+
+        f = ttk.Frame(d); f.pack(fill="both", expand=True, padx=5, pady=5)
+        sb = ttk.Scrollbar(f); tree = ttk.Treeview(f, columns=("t", "h"), show="headings", yscrollcommand=sb.set)
+        sb.config(command=tree.yview); sb.pack(side="right", fill="y"); tree.pack(side="left", fill="both", expand=True)
+        [tree.heading(c, text=t) or tree.column(c, width=w) for c, t, w in [("t", "目录名称", 300), ("h", "HTML文件", 100)]]
+        [tree.insert("", "end", values=(e.get('title','无标题'), e['href'])) for e in toc]
+
+        tree.bind("<Button-1>", lambda e: "break" if (i:=tree.identify_row(e.y)) and (tree.selection_remove(i) if i in tree.selection() else tree.selection_add(i)) else None)
+        def toggle(e):
+            if (i := tree.identify_row(e.y)):
+                tree.selection_remove(i) if i in tree.selection() else tree.selection_add(i)
+                return "break"
+        tree.bind("<Button-1>", toggle)
         def on_confirm():
-            self.excluded_toc_entries = [(v[0], v[1]) for i in tree.selection() if (v := tree.item(i)['values'])]
-            dialog.destroy()
-        confirm_btn = ttk.Button(dialog, text="确认", command=on_confirm)
-        # 布局
-        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        confirm_btn.pack(side="bottom", pady=5)
+            new_items = [(v[0], v[1]) for i in tree.selection() if (v:=tree.item(i)['values'])]
+            exist = getattr(self, 'excluded_toc_entries', []) or []
+            # 标题 路径完全一致时合并条目
+            combined = exist + [item for item in new_items if item not in exist]
+            self.excluded_toc_entries = combined
+            d.destroy()
+        ttk.Button(d, text="确认", command=on_confirm).pack(side="bottom", pady=5)
+
+    def show_exclude_list_dialog(self):
+        """章节合并排除的列表管理"""
+        if not hasattr(self, '_exclude_initialized'):
+            file_data = []
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    content = f.read().split('[ExcludeTocEntries]', 1)[-1].split('[', 1)[0]
+                    for line in (l.strip() for l in content.splitlines() if '|' in l):
+                        parts = (line.split('=', 1)[-1] if '=' in line else line).split('|', 1)
+                        file_data.append(tuple(p.strip() for p in parts))
+            except: pass
+            mem = getattr(self, 'excluded_toc_entries', []) or []
+            # 初始合并去重（标题+href一致才去重）
+            self.excluded_toc_entries = mem + [i for i in file_data if i not in mem]
+            self._exclude_initialized = True
+
+        d = tk.Toplevel(self.root); d.title("已排除的合并章节列表")
+        d.geometry(f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}")
+        f_tree = ttk.Frame(d); f_tree.pack(fill="both", expand=True, padx=5, pady=5)
+        tree = ttk.Treeview(f_tree, columns=("t", "h"), show="headings", selectmode="extended")
+        sb = ttk.Scrollbar(f_tree, orient="vertical", command=tree.yview); tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); tree.pack(side="left", fill="both", expand=True)
+        [tree.heading(c, text=t) or tree.column(c, width=w) for c, t, w in [("t", "目录名称", 300), ("h", "HTML文件", 150)]]
+        [tree.insert("", "end", values=v) for v in self.excluded_toc_entries]
+
+        sync = lambda: setattr(self, 'excluded_toc_entries', [tuple(tree.item(i, 'values')) for i in tree.get_children()])
+        #拽排序逻辑
+        tree.bind("<ButtonPress-1>", lambda e: setattr(tree, 's', tree.identify_row(e.y)), add='+')
+        tree.bind("<B1-Motion>", lambda e: (t := tree.identify_row(e.y)) and t != getattr(tree, 's', '') and (tree.move(tree.s, '', tree.index(t)), sync()))
+        def edit(e):
+            if not (item := tree.identify_row(e.y)) or not (col := tree.identify_column(e.x)): return
+            idx, (x, y, w, h) = int(col[1:])-1, tree.bbox(item, col)
+            ent = tk.Entry(tree, relief="flat", highlightthickness=1); ent.place(x=x, y=y, width=w, height=h)
+            ent.insert(0, tree.item(item, 'values')[idx]); ent.focus()
+            save = lambda *a: [tree.item(item, values=[(ent.get() if i==idx else v) for i,v in enumerate(tree.item(item,'values'))]), ent.destroy(), sync()]
+            ent.bind('<Return>', save); ent.bind('<FocusOut>', save)
+        menu = tk.Menu(d, tearoff=0)
+        menu.add_command(label="添加空白条目", command=lambda: [tree.insert('', 'end', values=("1", "1")), sync()])
+        menu.add_command(label="删除选中条目", command=lambda: [tree.delete(*tree.selection()), sync()])
+        tree.bind('<Double-1>', edit); tree.bind('<Delete>', lambda e: menu.invoke(1))
+        tree.bind('<Button-3>', lambda e: [tree.selection_set(r) if not tree.selection() and (r:=tree.identify_row(e.y)) else None, menu.post(e.x_root, e.y_root)])
+        ttk.Button(d, text="关闭", command=d.destroy).pack(side="bottom", pady=5)
 
     def show_class_list(self):
         """class样式收集分析对话框"""
-        if not hasattr(self, 'epub_path'):
-            messagebox.showwarning("警告", "请先选择EPUB文件")
-            return
-        if not hasattr(self, 'temp_style_content'):
-            self.temp_style_content = ""
-        def get_temp_style_content():
-            return self.temp_style_content
-        def set_temp_style_content(content):
-            self.temp_style_content = content
-        def append_temp_style_content(content):
-            self.temp_style_content += content
-        ClassList(self.root, self.epub_path, get_temp_style_content, set_temp_style_content, append_temp_style_content)
+        if not getattr(self, 'epub_path', None): return messagebox.showwarning("警告", "请先选择EPUB文件")
+        if not hasattr(self, 'temp_style_content'): self.temp_style_content = ""
+        ClassList(self.root, self.epub_path, 
+                  lambda: self.temp_style_content, 
+                  lambda v: setattr(self, 'temp_style_content', v), 
+                  lambda v: setattr(self, 'temp_style_content', self.temp_style_content + v))
 
     def save_app_settings(self, return_config=False):
         """保存AppSettings到config.ini，或返回ConfigParser对象"""
