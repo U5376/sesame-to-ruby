@@ -252,7 +252,7 @@ class EpubNCXGenerator:
             f.write(str(opf_soup))
 
     @staticmethod
-    def fix_ncx_paths(opf_path, offset_enabled=True, atokagi_enabled=True):
+    def fix_ncx_paths(opf_path, offset_enabled=True, atokagi_enabled=True, manual_offset=0):
         """检查并修正ncx中的src路径,尝试-1修正目录，补全あとがき条目"""
         opf_path = Path(opf_path)
         opf_soup = BeautifulSoup(opf_path.read_text(encoding='utf-8'), 'xml')
@@ -282,19 +282,26 @@ class EpubNCXGenerator:
             ncx_text = re.sub(r'src="([^"]+)"', replace_src, ncx_text)
             if any_changed: logger.success("ncx目录路径已修正")
 
-            # 判断最后一条目录文件是否存在，不存在则批量-1修正（受offset_enabled控制）
-            if offset_enabled:
-                if (ncx_srcs := re.findall(r'src="([^"]+)"', ncx_text)) and not (opf_path.parent / (last_src := ncx_srcs[-1].split('#')[0])).exists():
-                    l_t = (BeautifulSoup(ncx_text, 'xml').find_all('navPoint') or [None])[-1]
-                    logger.warning(f"最后一条目录文件不存在: {l_t.find('navLabel').text.strip() if l_t else ''} | ({ncx_srcs[-1]}) 全部目录批量-1修正")
-                    def offset_src(m):
-                        nonlocal any_changed
-                        s_p, *anc = m.group(1).split('#', 1)
-                        try: n_h = html_hrefs[html_hrefs.index(s_p)-1] if html_hrefs.index(s_p) > 0 else s_p
-                        except ValueError: n_h = html_hrefs[-1] if s_p == last_src else s_p
-                        if n_h != s_p: any_changed = True
-                        return f'src="{n_h}{"#" + anc[0] if anc else ""}"'
-                    ncx_text = re.sub(r'src="([^"]+)"', offset_src, ncx_text)
+            # 1.优先强制偏移,0则跳过 2.自动判断最后一条目录文件是否存在，不存在则-1修正（受offset_enabled控制）
+            ncx_srcs = re.findall(r'src="([^"]+)"', ncx_text)
+            last_f = ncx_srcs[-1] if ncx_srcs else ""; last_src = last_f.split('#')[0]
+            m_v = int(manual_offset or 0)
+            missing = last_src and not (opf_path.parent / last_src).exists()
+            shift = m_v if m_v else (-1 if (offset_enabled and missing) else 0)
+            if shift:
+                l_t = (BeautifulSoup(ncx_text, 'xml').find_all('navPoint') or [None])[-1]
+                lbl = l_t.find('navLabel').text.strip() if l_t and l_t.find('navLabel') else ""
+                logger.warning(f"强制目录{m_v}偏移,目录最后一条: {lbl} | ({last_f})" if m_v else 
+                               f"目录最后一条文件不存在: {lbl} | ({last_f}) 全部目录批量-1修正")
+                def offset_src(m):
+                    nonlocal any_changed
+                    s_p, *anc = m.group(1).split('#', 1)
+                    idx = html_hrefs.index(s_p) if s_p in html_hrefs else (len(html_hrefs) if s_p == last_src else -1)
+                    if idx >= 0:
+                        n_h = html_hrefs[max(0, min(len(html_hrefs)-1, idx + shift))]
+                        if n_h != s_p: any_changed, s_p = True, n_h
+                    return f'src="{s_p}{"#" + anc[0] if anc else ""}"'
+                ncx_text = re.sub(r'src="([^"]+)"', offset_src, ncx_text)
 
         # 只有在 ncx 或 nav 确实缺失“あとがき”条目时 才寻找あとがき文件（受atokagi_enabled控制）
         ncx_missing = ncx_text and 'あとがき' not in ncx_text

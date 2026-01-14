@@ -71,8 +71,9 @@ class EpubProcessor:
                 ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
             ('delete_style_enabled', '删除自带Style并添加自定义样式表', '清理原有样式跟opf竖排属性\n添加css文件及更新引用\n规格化头部信息', []),
             ('generate_ncx_enabled', '生成ncx并更新opf', '自动对照opf列表修正路径', [
-                ('ncx_offset_enabled', '-1修正', tk.Checkbutton, {'px': (10, 0)}, '最后一条目录文件不存在进行-1顺序修正'),
-                ('ncx_atokagi_enabled', '补充后记', tk.Checkbutton, {'px': (2, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
+                ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (3, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移'),
+                ('ncx_manual_offset_val', '0', tk.Entry, {'w': 3, 'px': (0, 0)}, '强制目录偏移+ -，0不执行操作\n优先于自动偏移'),
+                ('ncx_atokagi_enabled', '补全后记', tk.Checkbutton, {'px': (3, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
             ('convert_epub_version_enabled', '转Epub2.0并删除nav.xhtml', '将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明', []),
             ('convert_images_var', '转换图片', '图片转换设置', [
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
@@ -176,10 +177,10 @@ class EpubProcessor:
 
             opf_path = self._get_opf_path(temp_dir)
             # 生成ncx并更新opf
+            EpubNCXGenerator.fix_ncx_paths(opf_path, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
             if self.generate_ncx_enabled.get():
                 success, msg = EpubNCXGenerator.generate_ncx(opf_path)
-                if not success:
-                    logger.warning(f"NCX生成警告: {msg}")
+                if not success: logger.warning(f"NCX生成警告: {msg}")
 
             # 转换epub版本并删除nav
             if self.convert_epub_version_enabled.get():
