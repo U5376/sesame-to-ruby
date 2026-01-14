@@ -778,54 +778,37 @@ class EpubProcessor:
                   lambda v: setattr(self, 'temp_style_content', self.temp_style_content + v))
 
     def save_app_settings(self, return_config=False):
-        """保存AppSettings到config.ini，或返回ConfigParser对象"""
+        """保存到配置文件，或返回ConfigParser对象"""
         config = configparser.ConfigParser()
-        config['AppSettings'] = {name: str(var.get()) for name, var in self._settings_vars_dict.items()}
-        if return_config:
-            return config
-        # 统一保存AppSettings和RegexRules
-        from io import StringIO
-        buffer = StringIO()
-        config.write(buffer)
-        app_settings_content = buffer.getvalue().strip()
-        regex_rules_content = self.regex_manager.get_rules_content()
+        config['AppSettings'] = {k: str(v.get()) for k, v in self._settings_vars_dict.items()}
+        if entries := getattr(self, 'excluded_toc_entries', []):
+            config['ExcludeTocEntries'] = {str(i): f"{t}|{h}" for i, (t, h) in enumerate(entries)}
+        if return_config: return config
         try:
-            with open(self.config_file, 'w', encoding='utf-8', newline='\n') as f:
-                f.write(app_settings_content + "\n\n" + regex_rules_content + "\n")
+            import io
+            with io.StringIO() as buf:
+                config.write(buf)
+                content = f"{buf.getvalue().strip()}\n\n{self.regex_manager.get_rules_content()}\n"
+            self.config_file.write_text(content, encoding='utf-8')
             logger.info(f"设置已保存到: {self.config_file}")
-        except Exception as e:
-            logger.error(f"保存设置失败: {e}")
+        except Exception as e: logger.error(f"保存设置失败: {e}")
 
     def load_app_settings(self):
-        """从config.ini加载AppSettings"""
-        if not self.config_file.exists():
-            logger.warning(f"配置文件不存在: {self.config_file}")
-            return
+        """用 configparser 读取配置（跳过正则段）"""
+        if not self.config_file.exists(): return logger.warning(f"配置文件不存在: {self.config_file}")
         try:
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            # 只提取 [AppSettings] 段
-            app_settings_lines = []
-            in_section = False
-            for line in content.splitlines():
-                if line.strip().startswith("[AppSettings]"):
-                    in_section = True
-                if in_section:
-                    if line.strip().startswith("[") and not line.strip().startswith("[AppSettings]"):
-                        break
-                    app_settings_lines.append(line)
-            app_settings_text = "\n".join(app_settings_lines)
-            if not app_settings_text.strip():
-                return
             config = configparser.ConfigParser()
-            config.read_string(app_settings_text)
+            config.read_string(self.config_file.read_text('utf-8').split('[RegexRules]', 1)[0])
             if 'AppSettings' in config:
-                [var.set(config['AppSettings'].getboolean(name)) if isinstance(var, tk.BooleanVar) else var.set(config['AppSettings'][name])
-                 for name, var in self._settings_vars_dict.items() if name in config['AppSettings']]
-            hasattr(self, 'regex_manager') and self.regex_manager.set_log_level(self.log_level_var.get())
+                sec = config['AppSettings']
+                for name, var in self._settings_vars_dict.items():
+                    if name in sec:
+                        var.set(sec.getboolean(name) if isinstance(var, tk.BooleanVar) else sec[name])
+            if 'ExcludeTocEntries' in config:
+                self.excluded_toc_entries = [tuple(v.split('|', 1)) for _, v in config.items('ExcludeTocEntries') if '|' in v]
+            if hasattr(self, 'regex_manager'): self.regex_manager.set_log_level(self.log_level_var.get())
             logger.info(f"加载配置:[{self.log_level_var.get()}] {self.config_file}")
-        except Exception as e:
-            logger.error(f"加载配置失败: {e}")
+        except Exception as e: logger.error(f"加载配置失败: {e}")
 
     def reset_app_settings(self):
         """重置所有设置为控件默认值，并重置正则规则"""
