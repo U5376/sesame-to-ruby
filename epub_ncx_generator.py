@@ -361,3 +361,54 @@ class EpubNCXGenerator:
         # 只有在 any_changed 依旧为 False 时才显示此日志
         if not any_changed: logger.debug("ncx无需修正")
         return True, "ncx无需修正"
+
+    @staticmethod
+    def insert_sub_chapters(opf_path, parent_href, sub_chapters):
+        """插入子章节到指定父章节下"""
+        if not sub_chapters or not (ps := EpubNCXGenerator._find_nav_path(opf_path)): return 0
+        target_fn, added_this_time = Path(parent_href.split('#')[0]).name, 0
+        
+        # ncx 处理：解析 -> 内存递归插入 -> 重写ncx格式
+        if (nx_p := ps.get('ncx')) and nx_p.exists():
+            entries = EpubNCXGenerator._parse_ncx_to_entries(nx_p)
+            def inject(nodes):
+                for n in nodes:
+                    if Path(n['href'].split('#')[0]).name == target_fn:
+                        ex_h = {c['href'] for c in n['children']}
+                        n['children'].extend(new := [{'id': s['id'], 'title': BeautifulSoup(s['title'], 'html.parser').get_text(strip=True), 
+                                                      'href': s['href'], 'children': []} for s in sub_chapters if s['href'] not in ex_h])
+                        return len(new)
+                    if (res := inject(n['children'])) is not None: return res
+            if (cnt := inject(entries)) is not None:
+                nx_p.write_text(EpubNCXGenerator._create_ncx_content(EpubNCXGenerator._get_uid_from_opf(opf_path), entries, 
+                                EpubNCXGenerator._get_book_title_from_opf(opf_path)), 'utf-8')
+                logger.debug(f"成功在 {target_fn} 下追加【{cnt}】个子章节")
+                added_this_time = cnt
+
+        # nav追加插入章节 没测试 全交给bs了
+        if (nv_p := ps.get('nav')) and nv_p.exists():
+            sp = BeautifulSoup(nv_p.read_text('utf-8'), 'html.parser')
+            if (ta := sp.find('a', href=lambda h: h and Path(h.split('#')[0]).name == target_fn)) and (li := ta.parent):
+                lst = li.find(['ol', 'ul']) or li.append(sp.new_tag('ol')) or li.find('ol')
+                ex_h, added_nav = {a.get('href') for a in lst.find_all('a')}, 0
+                for s in sub_chapters:
+                    if s['href'] not in ex_h:
+                        (ni := sp.new_tag('li')).append(sp.new_tag('a', href=s['href'], string=s['title']))
+                        lst.append(ni); added_nav += 1
+                if added_nav > 0:
+                    nv_p.write_text(sp.decode(formatter='html'), 'utf-8')
+                    logger.debug(f"nav 追加子章节: {target_fn} (+{added_nav})")
+                    added_this_time = max(added_this_time, added_nav)
+        return added_this_time # 返回给外层循环累计
+
+    @staticmethod
+    def _parse_ncx_to_entries(ncx_path):
+        """解析 ncx 为嵌套字典"""
+        soup = BeautifulSoup(ncx_path.read_text('utf-8'), 'xml')
+        def parse(tag):
+            return [{
+                'title': pt.find('navLabel').text.strip(),
+                'href': pt.find('content')['src'],
+                'children': parse(pt)
+            } for pt in tag.find_all('navPoint', recursive=False)]
+        return parse(soup.find('navMap')) if soup.find('navMap') else []

@@ -192,6 +192,11 @@ class EpubProcessor:
             # 章节间合并
             if self.merge_xhtml_enabled.get():
                 self.merge_xhtml_files(temp_dir)
+            
+            # 重新解析目录 正则匹配追加、分割章节
+            opf_path = self._get_opf_path(temp_dir)
+            toc_data = self._parse_toc(BeautifulSoup(opf_path.read_text('utf-8'), 'xml'), opf_path)
+            self._apply_regex_split(temp_dir, toc_data)
 
             # 遍历所有文件并处理
             for root, dirs, files in os.walk(temp_dir):
@@ -695,37 +700,132 @@ class EpubProcessor:
         return str(soup)
 
     def show_exclude_dialog(self):
-        """章节合并排除对话框"""
-        if not getattr(self, 'epub_path', None): return messagebox.showwarning("警告", "请先选择EPUB文件")
-        with tempfile.TemporaryDirectory() as td, zipfile.ZipFile(self.epub_path) as z:
-            z.extractall(td); opf = self._get_opf_path(Path(td))
-            m_off = self.ncx_manual_offset_val.get()
-            EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), m_off)
-            if not (toc := self._parse_toc(BeautifulSoup(opf.read_text('utf-8'), 'xml'), opf)):
-                return messagebox.showwarning("警告", "未找到目录条目")
-        d = tk.Toplevel(self.root); d.title("选择不合并的目录条目")
-        d.geometry(f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}")
+        """章节合并排除/正则追加分割章节 对话框"""
+        if not getattr(self, "epub_path", None): return messagebox.showwarning("警告", "请先选择EPUB文件")
+        # 1. 环境准备与记忆初始化
+        self._fcache, self._saved_hrefs = {}, {item[1] for item in getattr(self, "excluded_toc_entries", [])}
+        if hasattr(self, "_exclude_tempdir"): shutil.rmtree(self._exclude_tempdir, ignore_errors=True)
+        self._exclude_tempdir = tempfile.mkdtemp(); temp_path = Path(self._exclude_tempdir)
+        with zipfile.ZipFile(self.epub_path) as z: z.extractall(temp_path)
+        opf = self._get_opf_path(temp_path)
+        EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
+        self._init_toc, self._curr_toc = (t := self._parse_toc(BeautifulSoup(opf.read_text("utf-8"), "xml"), opf)), t.copy()
+        if not t: return messagebox.showwarning("警告", "未找到目录条目")
 
-        f = ttk.Frame(d); f.pack(fill="both", expand=True, padx=5, pady=5)
-        sb = ttk.Scrollbar(f); tree = ttk.Treeview(f, columns=("t", "h"), show="headings", yscrollcommand=sb.set)
-        sb.config(command=tree.yview); sb.pack(side="right", fill="y"); tree.pack(side="left", fill="both", expand=True)
-        [tree.heading(c, text=t) or tree.column(c, width=w) for c, t, w in [("t", "目录名称", 300), ("h", "HTML文件", 100)]]
-        [tree.insert("", "end", values=(e.get('title','无标题'), e['href'])) for e in toc]
+        # 2. UI 构建
+        dialog = tk.Toplevel(self.root); dialog.title("选择不合并条目 / 正则追加分割章节")
+        dialog.geometry(f"605x600+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}")
+        main_frame = ttk.Frame(dialog); main_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        tree = ttk.Treeview(main_frame, columns=("t", "h"), show="headings", selectmode="extended")
+        sb = ttk.Scrollbar(main_frame, command=tree.yview); tree.configure(yscrollcommand=sb.set); sb.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        [tree.heading(c, text=t) or tree.column(c, width=w) for c, t, w in [("t", "目录 (选中不合并)", 350), ("h", "HTML文件", 150)]]
 
-        tree.bind("<Button-1>", lambda e: "break" if (i:=tree.identify_row(e.y)) and (tree.selection_remove(i) if i in tree.selection() else tree.selection_add(i)) else None)
-        def toggle(e):
-            if (i := tree.identify_row(e.y)):
-                tree.selection_remove(i) if i in tree.selection() else tree.selection_add(i)
-                return "break"
-        tree.bind("<Button-1>", toggle)
+        def update_mem(): 
+            if tree.get_children(): self._saved_hrefs = {tree.item(i)["values"][1] for i in tree.selection()}
+        def refresh():
+            tree.delete(*tree.get_children())
+            for e in self._curr_toc:
+                iid = tree.insert("", "end", values=(("\u3000"*e.get('depth',0))+e.get('title',''), e['href']))
+                if e['href'] in self._saved_hrefs: tree.selection_add(iid)
+        def run_splits():
+            update_mem(); self._curr_toc, self._split_rules = self._init_toc.copy(), []
+            p_list = [e.get().strip() for e in regex_entries if e.get().strip()]
+            [self._split_rules.append((p, '分割章节{idx}', 1)) for p in p_list]
+            if p_list and (nt := self._internal_split_logic(p_list, self._curr_toc, temp_path)): self._curr_toc = nt
+            refresh()
+        # 正则输入区
+        regex_entries, reg_frame = [], ttk.Frame(dialog); reg_frame.pack(fill="x", padx=5)
+        def add_row(txt=""):
+            row = ttk.Frame(reg_frame); row.pack(fill="x", pady=1)
+            en = tk.Entry(row); en.pack(side="left", fill="x", expand=True, padx=2); en.insert(0, txt); regex_entries.append(en)
+            m = tk.Menu(dialog, tearoff=0); m.add_command(label="新增正则框", command=add_row)
+            m.add_command(label="删除正则条目", command=lambda: [row.destroy(), regex_entries.remove(en), run_splits()] if len(regex_entries)>1 else [en.delete(0, 'end'), run_splits()])
+            m.add_command(label="粘贴并预览", command=lambda: [en.delete(0, 'end'), en.insert(0, dialog.clipboard_get()), run_splits()])
+            en.bind("<Button-3>", lambda e: m.post(e.x_root, e.y_root)); en.bind("<Return>", lambda e: run_splits())
+        tree.bind("<Button-1>", lambda e: (i:=tree.identify_row(e.y)) and [tree.selection_remove(i) if i in tree.selection() else tree.selection_add(i), update_mem()] and "break")
+        [add_row(r) for r in (getattr(self, "_saved_regex_list", []) or [""])]; run_splits()
+        # 底部按钮
+        btn_frame = ttk.Frame(dialog); btn_frame.pack(side="bottom", fill="x", pady=10)
+        inner_box = ttk.Frame(btn_frame); inner_box.pack(anchor="center")
+        ttk.Button(inner_box, text="预览全部正则追加、分割章节", command=run_splits).pack(side="left", padx=5)
         def on_confirm():
-            new_items = [(v[0], v[1]) for i in tree.selection() if (v:=tree.item(i)['values'])]
-            exist = getattr(self, 'excluded_toc_entries', []) or []
-            # 标题 路径完全一致时合并条目
-            combined = exist + [item for item in new_items if item not in exist]
-            self.excluded_toc_entries = combined
-            d.destroy()
-        ttk.Button(d, text="确认", command=on_confirm).pack(side="bottom", pady=5)
+            run_splits()
+            update_mem(); self._saved_regex_list = [e.get().strip() for e in regex_entries if e.get().strip()] or [""]
+            exist = {i[1] for i in getattr(self, "excluded_toc_entries", [])}
+            new_items = [(tree.item(i)["values"][0], tree.item(i)["values"][1]) for i in tree.selection()]
+            self.excluded_toc_entries = getattr(self, "excluded_toc_entries", []) + [x for x in new_items if x[1] not in exist]
+            self.toc_data = self._curr_toc; dialog.destroy()
+        ttk.Button(inner_box, text="追加排除条目/正则追加&分割子章节", command=on_confirm).pack(side="left", padx=5)
+
+    def _get_spine_ordered_files(self, opf_path):
+        """获取按 Spine 顺序排列的 HTML 文件列表"""
+        soup = BeautifulSoup(opf_path.read_text('utf-8'), 'xml')
+        m = {it['id']: it['href'] for it in soup.find('manifest').find_all('item')}
+        return [f for r in soup.find('spine').find_all('itemref') if (f := opf_path.parent / m.get(r.get('idref', ''))) 
+                and f.exists() and f.suffix.lower() in ['.html', '.xhtml', '.htm']]
+
+    def _clean_title(self, html_fragment):
+        """统一标题清洗 处理多余标签及空格"""
+        soup = BeautifulSoup(html_fragment, 'html.parser')
+        for img in soup.find_all('img'): img.decompose() # 移除所有图片标签，避免 alt 属性干扰标题
+        t = soup.get_text().replace('\u3000', ' ').replace('\xa0', ' ').strip() # 直接取 text，并处理全角/半角空格
+        return ' '.join(t.split()) # 将多个连续空格合并为一个
+
+    def _internal_split_logic(self, patterns, current_toc, temp_dir):
+        """章节分割预览逻辑"""
+        try: rules = re.compile("|".join(f"(?:{p})" for p in patterns), re.DOTALL)
+        except: return None
+        if not hasattr(self, "_fcache"): self._fcache = {}
+        opf, new_toc, dep = self._get_opf_path(Path(temp_dir)), [], 0
+        lookup = {t['href'].split('#')[0].split('/')[-1]: t for t in current_toc}
+        for hf in self._get_spine_ordered_files(opf):
+            if (n := hf.name) in lookup: new_toc.append(e := lookup[n]); dep = e.get('depth', 0)
+            if n not in self._fcache: self._fcache[n] = hf.read_text('utf-8', 'ignore')
+            if rules.search(c := self._fcache[n]):
+                [new_toc.append({'title': self._clean_title(m.group()) or f"Sec {i}", 
+                                 'href': f"{hf.stem}_spt_{i:03d}.xhtml", 'depth': dep+1}) 
+                 for i, m in enumerate(rules.finditer(c), 1)]
+        return new_toc
+
+    def _apply_regex_split(self, temp_dir, current_toc=None):
+        """正则匹配子章节追加分割逻辑"""
+        if not (rules := getattr(self, '_split_rules', [])): return current_toc
+        opf_p, last_href, total = self._get_opf_path(Path(temp_dir)), None, 0
+        regex = re.compile("|".join(f"(?:{r[0]})" for r in rules if r), re.DOTALL)
+        lookup = {Path(t['href'].split('#')[0]).name: t for t in (current_toc or [])}
+        TPL = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n'
+               '<html xml:lang="{l}" xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">\n'
+               '<head>\n<title>{t}</title>\n<link href="../css/style.css" rel="stylesheet" type="text/css"/>\n</head>\n'
+               '<body>\n{c}\n</body>\n</html>')
+        for hf in self._get_spine_ordered_files(opf_p):
+            if (n := hf.name) in lookup:
+                last_href = lookup[n]['href']; logger.debug(f"更新父级锚点: {n} -> {last_href}")
+            raw = hf.read_text('utf-8', 'ignore')
+            if not (ms := list(regex.finditer(raw))) or not last_href: continue
+            # 提取元数据：如果原文件有则用原文件的，没有则默认 ja
+            title = (re.search(r'<title>(.*?)</title>', raw, re.I) or [0, "Chapter"])[1]
+            lang = (re.search(r'xml:lang="(.*?)"', raw, re.I) or [0, "ja"])[1]
+            logger.debug(f"分割文件: {n} | 注入锚点: {last_href}")
+            hf.write_text(raw[:ms[0].start()].split("</body>")[0] + "\n</body>\n</html>", 'utf-8')
+            ivs, subs, cur_h = [m.start() for m in ms] + [len(raw)], [], hf.relative_to(opf_p.parent).as_posix()
+            for i, m in enumerate(ms):
+                new_f = hf.parent / f"{hf.stem}_spt_{i+1:03d}.xhtml"
+                new_f.write_text(TPL.format(l=lang, t=title, c=raw[ivs[i]:ivs[i+1]].split("</body>")[0].strip()), 'utf-8')
+                subs.append({'id': new_f.stem.replace('.', '_'), 'href': new_f.relative_to(opf_p.parent).as_posix(), 't': m.group()})
+            # OPF 原位插入(Manifest 紧跟原文件，Spine 保持顺序)
+            soup = BeautifulSoup(opf_p.read_text('utf-8'), 'xml')
+            if (old_it := soup.find('item', href=cur_h)) and (old_rf := soup.find('itemref', idref=old_it['id'])):
+                for s in subs:
+                    if not soup.find('item', id=s['id']):
+                        old_it.insert_after(ni := soup.new_tag('item', id=s['id'], href=s['href'], **{'media-type': 'application/xhtml+xml'}))
+                        old_it = ni
+                [old_rf.insert_after(soup.new_tag('itemref', idref=s['id'])) for s in reversed(subs)]
+                opf_p.write_text(str(soup), 'utf-8')
+            try: total += (EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, [{'id':x['id'],'href':x['href'],'title':self._clean_title(x['t'])} for x in subs]) or 0)
+            except: pass
+        if total > 0: logger.info(f"追加/分割章节完成: 共 {total} 条子章节")
+        return current_toc
 
     def show_exclude_list_dialog(self):
         """章节合并排除的列表管理"""
