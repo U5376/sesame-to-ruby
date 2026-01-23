@@ -177,29 +177,26 @@ class EpubNCXGenerator:
 
     @staticmethod
     def _create_ncx_content(uid, toc_entries, book_title):
-        nav_points = []
-        play_order = 1
         def calculate_max_depth(entries, current_depth=1):
-            max_depth = current_depth
-            for entry in entries:
-                if entry['children']:
-                    child_depth = calculate_max_depth(entry['children'], current_depth + 1)
-                    if child_depth > max_depth:
-                        max_depth = child_depth
-            return max_depth
-        nav_points = EpubNCXGenerator._build_ncx_points(toc_entries)
+            return max([calculate_max_depth(e['children'], current_depth + 1) for e in entries if e.get('children')] + [current_depth])
+        class PlayOrder:
+            def __init__(self): self.count = 1
+            def get(self):
+                val = self.count; self.count += 1; return val
+        order_gen = PlayOrder()
+        nav_points = EpubNCXGenerator._build_ncx_points(toc_entries, order_gen)
         max_depth = calculate_max_depth(toc_entries) if toc_entries else 1
         return f'''<?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
     <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
     <head>
-    <meta content="{uid}" name="dtb:uid"/>
-    <meta content="{max_depth}" name="dtb:depth"/>
-    <meta content="0" name="dtb:totalPageCount"/>
-    <meta content="0" name="dtb:maxPageNumber"/>
+      <meta content="{uid}" name="dtb:uid"/>
+      <meta content="{max_depth}" name="dtb:depth"/>
+      <meta content="0" name="dtb:totalPageCount"/>
+      <meta content="0" name="dtb:maxPageNumber"/>
     </head>
     <docTitle>
-     <text>{book_title}</text>
+      <text>{book_title}</text>
     </docTitle>
     <navMap>
     {"".join(nav_points)}
@@ -207,19 +204,18 @@ class EpubNCXGenerator:
     </ncx>'''
 
     @staticmethod
-    def _build_ncx_points(entries, play_order_start=1):
-        play_order = play_order_start
+    def _build_ncx_points(entries, order_gen):
         points = []
         for entry in entries:
+            play_order = order_gen.get()
             point_id = f"navPoint-{play_order}"
             nav_point = f'''
             <navPoint id="{point_id}" playOrder="{play_order}">
                 <navLabel><text>{entry['title']}</text></navLabel>
                 <content src="{entry['href']}"/>'''
-            play_order += 1
             if entry.get('children'):
-                child_points = EpubNCXGenerator._build_ncx_points(entry['children'], play_order)
-                nav_point += f'\n{"".join(child_points)}\n</navPoint>'
+                child_xmls = EpubNCXGenerator._build_ncx_points(entry['children'], order_gen)
+                nav_point += f'\n{"".join(child_xmls)}\n</navPoint>'
             else:
                 nav_point += '\n</navPoint>'
             points.append(nav_point)
