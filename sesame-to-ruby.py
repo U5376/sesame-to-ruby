@@ -187,7 +187,11 @@ class EpubProcessor:
             if self.convert_epub_version_enabled.get():
                 success, msg = EpubNCXGenerator.convert_to_epub2(opf_path)
                 if not success:
-                    logger.warning(f"版本转换警告: {msg}")               
+                    logger.warning(f"版本转换警告: {msg}")
+
+            # 章节间合并
+            if self.merge_xhtml_enabled.get():
+                self.merge_xhtml_files(temp_dir)
 
             # 遍历所有文件并处理
             for root, dirs, files in os.walk(temp_dir):
@@ -218,10 +222,6 @@ class EpubProcessor:
             logger.info("傍点转换ruby格式 √")
             logger.info("正则替换 √")
             logger.info("图片标签规格化 √")
-
-            # html章节间合并
-            if self.merge_xhtml_enabled.get():
-                self.merge_xhtml_files(temp_dir)
 
             # 空行处理
             self.process_blank_lines(temp_dir)
@@ -431,7 +431,8 @@ class EpubProcessor:
                         nav_soup.find('nav', attrs={'role': 'doc-toc'}) or
                         nav_soup.find('nav', id='toc')):
                 return [
-                    {'title': a.text.strip(), 'href': a['href'].split('#')[0]}
+                    {'title': a.text.strip(), 'href': a['href'].split('#')[0], 
+                     'depth': len(a.find_parents('li')) - 1}
                     for a in nav_tag.find_all('a', href=True)]
         # ncx
         if (ncx_item := opf_soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})) and (ncx_path := (opf_path.parent / ncx_item['href']).resolve()).exists():
@@ -439,7 +440,8 @@ class EpubProcessor:
                 ncx_soup = BeautifulSoup(f.read(), 'xml')
             if nav_map := ncx_soup.find('navMap'):
                 return [
-                    {'title': nav_point.find('navLabel').text.strip(), 'href': nav_point.find('content')['src']}
+                    {'title': nav_point.find('navLabel').text.strip(), 'href': nav_point.find('content')['src'],
+                     'depth': len(nav_point.find_parents('navPoint'))}
                     for nav_point in nav_map.find_all('navPoint')]
         return []
 
