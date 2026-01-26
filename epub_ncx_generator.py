@@ -179,11 +179,7 @@ class EpubNCXGenerator:
     def _create_ncx_content(uid, toc_entries, book_title):
         def calculate_max_depth(entries, current_depth=1):
             return max([calculate_max_depth(e['children'], current_depth + 1) for e in entries if e.get('children')] + [current_depth])
-        class PlayOrder:
-            def __init__(self): self.count = 1
-            def get(self):
-                val = self.count; self.count += 1; return val
-        order_gen = PlayOrder()
+        order_gen = EpubNCXGenerator.PlayOrder()
         nav_points = EpubNCXGenerator._build_ncx_points(toc_entries, order_gen)
         max_depth = calculate_max_depth(toc_entries) if toc_entries else 1
         return f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -202,6 +198,9 @@ class EpubNCXGenerator:
     {"".join(nav_points)}
     </navMap>
     </ncx>'''
+    class PlayOrder:
+        def __init__(self, n=1): self.n = n
+        def get(self): return (v := self.n, setattr(self, 'n', v + 1))[0]
 
     @staticmethod
     def _build_ncx_points(entries, order_gen):
@@ -335,7 +334,7 @@ class EpubNCXGenerator:
                 ins_pos = next((i for i, e in enumerate(entries) if e['href'] and get_idx(e['href']) > a_idx), len(entries))
                 entries.insert(ins_pos, {'title': 'あとがき', 'href': atokagi_file, 'children': []})
                 
-                ncx_text = ncx_text[:m_nav.start(2)] + "\n" + "".join(EpubNCXGenerator._build_ncx_points(entries, 1)) + "\n" + ncx_text[m_nav.end(2):]
+                ncx_text = ncx_text[:m_nav.start(2)] + "\n" + "".join(EpubNCXGenerator._build_ncx_points(entries, EpubNCXGenerator.PlayOrder(1))) + "\n" + ncx_text[m_nav.end(2):]
                 any_changed = True
                 logger.success(f"ncx 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
 
