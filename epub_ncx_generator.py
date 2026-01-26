@@ -20,7 +20,6 @@ class EpubNCXGenerator:
                 if ncx_path.resolve() != target_ncx.resolve(): shutil.move(ncx_path, target_ncx)
                 logger.debug(f"已将ncx移动到根目录: {target_ncx}")
                 EpubNCXGenerator._update_opf_reference(opf_path, 'toc.ncx')
-                EpubNCXGenerator.fix_ncx_paths(opf_path)
                 logger.info("toc.ncx已存在，已确保OPF引用和spine跟ncx内路径正确")
                 return True, "toc.ncx已存在，已确保OPF引用和spine跟ncx内路径正确"
 
@@ -32,7 +31,6 @@ class EpubNCXGenerator:
                 with open(target_ncx, 'w', encoding='utf-8') as f:
                     f.write(EpubNCXGenerator._create_ncx_content(uid, toc_entries, book_title))
                 EpubNCXGenerator._update_opf_reference(opf_path, 'toc.ncx')
-                EpubNCXGenerator.fix_ncx_paths(opf_path)
                 logger.success("ncx生成成功（基于nav）")
                 return True, "ncx生成成功（基于nav）"
 

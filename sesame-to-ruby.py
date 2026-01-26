@@ -178,10 +178,12 @@ class EpubProcessor:
 
             opf_path = self._get_opf_path(temp_dir)
             # 生成ncx并更新opf
-            EpubNCXGenerator.fix_ncx_paths(opf_path, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
             if self.generate_ncx_enabled.get():
                 success, msg = EpubNCXGenerator.generate_ncx(opf_path)
                 if not success: logger.warning(f"NCX生成警告: {msg}")
+
+            # 调用fix_ncx_paths并传递 目录偏移、强制偏移、补全あとが 开关状态
+            EpubNCXGenerator.fix_ncx_paths(opf_path, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
 
             # 转换epub版本并删除nav
             if self.convert_epub_version_enabled.get():
