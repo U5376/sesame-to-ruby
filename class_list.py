@@ -1,10 +1,8 @@
-import os
 import re
 import zipfile
-import tempfile
 import tkinter as tk
 from tkinter import ttk, messagebox
-from bs4 import BeautifulSoup
+import lxml.html
 
 class ClassList:
     def __init__(self, root, epub_path, get_temp, set_temp, append_temp):
@@ -39,67 +37,62 @@ class ClassList:
 
         style_data, used_classes, used_spans, used_images = {}, set(), set(), set()
         css_pattern = re.compile(r'([^{]+)\{([^}]+)\}', re.DOTALL)
-        html_pattern = re.compile(r'.*\.(x?html?)$', re.I)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            with zipfile.ZipFile(self.epub_path, 'r') as zf: zf.extractall(tmp)
-            for root, _, files in os.walk(tmp):
-                for file in files:
-                    path = os.path.join(root, file)
-                    rel = os.path.relpath(path, tmp)
-                    if file.endswith('.css'):
-                        with open(path, 'r', encoding='utf-8') as f:
-                            content = re.sub(r'/\*.*?\*/', '', f.read(), flags=re.DOTALL)
-                            for sel, body in css_pattern.findall(content):
-                                sel = [s.strip() for s in sel.split(',')]
-                                fmt = re.sub(r';\s*', ';\n  ', body.strip())
-                                for s in sel:
-                                    for cls in re.findall(r'\.([\w-]+)', s):
-                                        style_data.setdefault(cls, {}).setdefault(rel, []).append({'selector': s, 'content': fmt})
-                    elif html_pattern.match(file):
-                        with open(path, 'r', encoding='utf-8') as f:
-                            soup = BeautifulSoup(f.read(), 'html.parser')
-                            used_classes |= {cls for tag in soup.find_all(class_=True) for cls in tag.get('class', [])}
-                            used_spans   |= {cls for tag in soup.find_all('span') if tag.get('class') for cls in tag['class']}
-                            used_images  |= {cls for tag in soup.find_all('img') if tag.get('class') for cls in tag['class']}
-        nodes = {
-            'Class列表': (used_classes, tree.insert("", "end", text="Class列表", open=True)),
-            'Span列表':  (used_spans,   tree.insert("", "end", text="Span列表", open=True)),
-            '图片Class列表': (used_images,  tree.insert("", "end", text="图片Class列表", open=True))
-        }
-        all_items = []
-        for group, (classes, node) in nodes.items():
-            for cls in sorted(classes):
-                item_id = tree.insert(node, "end", text=cls)
-                all_items.append((group, cls, item_id))
+        try:
+            with zipfile.ZipFile(self.epub_path, 'r') as archive:
+                for file_name in archive.namelist():
+                    # 处理css
+                    if file_name.endswith('.css'):
+                        with archive.open(file_name) as file:
+                            clean_css = re.sub(r'/\*.*?\*/', '', file.read().decode('utf-8', 'ignore'), flags=re.DOTALL)
+                            for selector, body in css_pattern.findall(clean_css):
+                                formatted_content = re.sub(r';\s*', ';\n  ', body.strip())
+                                for part in [s.strip() for s in selector.split(',')]:
+                                    for class_name in re.findall(r'\.([\w-]+)', part):
+                                        style_data.setdefault(class_name, {}).setdefault(file_name, []).append({'selector': part, 'content': formatted_content})
+                    # 处理xhtml 使用 XPath 仅提取带 class 的标签
+                    elif file_name.endswith(('.html', '.xhtml')):
+                        with archive.open(file_name) as file:
+                            html_tree = lxml.html.fromstring(file.read())
+                            for element in html_tree.xpath('//*[@class]'):
+                                class_list = element.get('class').split() # .split() 自动处理字符串并解决“只读首字母”问题
+                                used_classes.update(class_list)
+                                # 快速获取标签名并更新对应集合
+                                tag_name = element.tag.rsplit('}', 1)[-1]
+                                if tag_name == 'span': used_spans.update(class_list)
+                                elif tag_name == 'img': used_images.update(class_list)
+        except Exception as error:
+            messagebox.showerror("解析失败", f"错误: {error}", parent=cw)
+
+        # 界面填充
+        categories = {'Class列表': used_classes, 'Span列表': used_spans, '图片Class列表': used_images}
+        nodes = {title: (classes, tree.insert("", "end", text=title, open=True)) for title, classes in categories.items()}
+        all_items = [(title, name, tree.insert(node, "end", text=name)) 
+                     for title, (classes, node) in nodes.items() for name in sorted(classes)]
 
         def show_details(event):
-            item = tree.selection()[0]
-            parent = tree.parent(item)
-            if parent in (nodes['Class列表'][1], nodes['Span列表'][1], nodes['图片Class列表'][1]):
+            if not (item := tree.identify_row(event.y) or (sel := tree.selection() and sel[0])):
+                return
+            if tree.parent(item) in [nodes[k][1] for k in ['Class列表', 'Span列表', '图片Class列表']]:
                 name = tree.item(item, "text")
-                details = []
-                if name in style_data:
-                    for path, rules in style_data[name].items():
-                        for rule in rules:
-                            lines = [f"  {line.strip()}" for line in rule['content'].split('\n') if line.strip()]
-                            details.append(f"文件: {path}\n{rule['selector']} {{\n" + '\n'.join(lines) + "\n}\n\n")
+                details = [
+                    f"文件: {p}\n{r['selector']} {{\n" + 
+                    "\n".join(f"  {line.strip()}" for line in r['content'].split('\n') if line.strip()) + 
+                    "\n}\n\n"
+                    for p, rs in style_data.get(name, {}).items() for r in rs
+                ]
+
                 win = tk.Toplevel(cw)
                 win.title(name)
                 win.geometry(f"350x180+{self.root.winfo_x()+160}+{self.root.winfo_y()+130}")
-                frame = ttk.Frame(win)
-                frame.pack(fill="both", expand=True, padx=5, pady=5)
-                text = tk.Text(frame, wrap="word", font=('Consolas', 10))
-                text.insert("end", "".join(details) or f"未找到 {name} 的CSS定义")
-                text.config(state="disabled")
-                vsb = ttk.Scrollbar(frame, command=text.yview)
-                text.config(yscrollcommand=vsb.set)
-                vsb.pack(side="right", fill="y")
-                text.pack(side="left", fill="both", expand=True)
-                def on_close():
-                    win.destroy()
-                    tree.focus_set()
-                win.protocol("WM_DELETE_WINDOW", on_close)
+                
+                f = ttk.Frame(win); f.pack(fill="both", expand=True, padx=5, pady=5)
+                t = tk.Text(f, wrap="word", font=('Consolas', 10))
+                t.insert("end", "".join(details) or f"未找到 {name} 的CSS定义")
+                t.config(state="disabled")
+                v = ttk.Scrollbar(f, command=t.yview); t.config(yscrollcommand=v.set)
+                v.pack(side="right", fill="y"); t.pack(side="left", fill="both", expand=True)
+                win.protocol("WM_DELETE_WINDOW", lambda: [win.destroy(), tree.focus_set()])
         tree.bind("<Double-1>", show_details)
 
         def copy_selected():
@@ -108,7 +101,7 @@ class ClassList:
             for i in items:
                 name = tree.item(i, "text")
                 if name in style_data:
-                    for path, rules in style_data[name].items():
+                    for _, rules in style_data[name].items():  # 将 path 改为 _，表示不读取文件路径
                         for rule in rules:
                             lines = [f"  {line.strip()}" for line in rule['content'].split('\n') if line.strip()]
                             details_list.append(f"\n{rule['selector']} {{\n" + '\n'.join(lines) + "\n}")
@@ -125,7 +118,7 @@ class ClassList:
             for i in items:
                 name = tree.item(i, "text")
                 if name in style_data:
-                    for path, rules in style_data[name].items():
+                    for _, rules in style_data[name].items():
                         for rule in rules:
                             lines = [line.strip() for line in rule['content'].split('\n') if line.strip()]
                             style_lines.append(f"{rule['selector']} {{\n" + '\n'.join(lines) + "\n}\n")
@@ -151,7 +144,7 @@ class ClassList:
             for group, cls, iid in all_items:
                 show = False
                 if cls in style_data:  # 修复 KeyError
-                    for path, rules in style_data[cls].items():
+                    for rules in style_data[cls].values():
                         for rule in rules:
                             if keyword in rule['selector'].lower() or keyword in rule['content'].lower():
                                 show = True
@@ -165,13 +158,16 @@ class ClassList:
         def edit_temp_style():
             win = tk.Toplevel(cw)
             win.title("编辑临时样式")
-            win.geometry(f"400x300+{cw.winfo_x()+60}+{cw.winfo_y()+60}")
+            win.geometry(f"400x280+{cw.winfo_x()+60}+{cw.winfo_y()+60}")
             frame = ttk.Frame(win)
             frame.pack(fill="both", expand=True, padx=5, pady=5)
             text = tk.Text(frame, wrap="word", font=('Consolas', 10))
             current_content = self.get_temp_style_content()
             text.insert("end", current_content)
-            text.pack(fill="both", expand=True)
+            vsb = ttk.Scrollbar(frame, command=text.yview)
+            text.config(yscrollcommand=vsb.set)
+            vsb.pack(side="right", fill="y")
+            text.pack(side="left", fill="both", expand=True)
             def on_close():
                 self.set_temp_style_content(text.get("1.0", "end-1c"))
                 win.destroy()
