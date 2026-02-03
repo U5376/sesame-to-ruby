@@ -161,6 +161,13 @@ class EpubProcessor:
         logger.remove(logger_id)
         logger.success(f"批量转换完成: 共{len(ps)}，ERROR:{counts['ERROR']}，WARNING:{counts['WARNING']}")
 
+    def _fmt(self, soup):
+        from bs4.formatter import HTMLFormatter, EntitySubstitution
+        sub_func = getattr(EntitySubstitution, 'substitute_xml', 
+                           getattr(EntitySubstitution, 'substitute_xml_entities', None))
+        return soup.decode(formatter=HTMLFormatter(entity_substitution=lambda s: 
+            sub_func(s).replace('\u00A0', '&#160;')))
+
     def process_epub(self, output_filename):
         """实际开始处理流程"""
         logger.info(f"开始处理epub文件: {self.epub_path}")
@@ -422,7 +429,7 @@ class EpubProcessor:
                 limit = int(limit_blank)
                 for group in blank_groups:
                     for t in group[limit:]: t.decompose()
-            file_path.write_text(str(soup), encoding='utf-8')
+            file_path.write_text(self._fmt(soup), encoding='utf-8')
 
     def _get_opf_path(self, temp_dir):
         """解析container.xml 准确获取opf名字路径"""
