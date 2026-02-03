@@ -213,30 +213,23 @@ class EpubProcessor:
             self._apply_regex_split(temp_dir, toc_data)
 
             # 遍历所有文件并处理
-            for root, dirs, files in os.walk(temp_dir):
-                for file in files:
-                    file_path = Path(root) / file
-                    if file.endswith('.xhtml') or file.endswith('.html'):
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        soup = BeautifulSoup(content, 'html.parser')
+            for xf in Path(temp_dir).rglob("*"):
+                    if xf.suffix.lower() in ('.xhtml', '.html'):
+                        soup = BeautifulSoup(xf.read_text('u8'), 'html.parser')
+                        # ruby规格化 傍点转ruby
+                        if self.process_ruby_enabled.get(): self.process_ruby(soup)
+                        if self.modify_html_enabled.get(): self.modify_html(soup, class_name)
 
-                        if self.process_ruby_enabled.get():
-                            self.process_ruby(soup)
-                        content = str(soup)
+                        # 正则替换
+                        content = self.regex_manager.apply_rules(self._fmt(soup))
 
-                        if self.modify_html_enabled.get():
-                            content = self.modify_html(content, class_name)
-
-                        content = self.regex_manager.apply_rules(content)
-
+                        # 图片标签处理
                         if self.process_images_enabled.get():
-                            soup = BeautifulSoup(content, 'html.parser')
-                            self.post_process_images(soup)
-                            content = str(soup)
+                            soup_img = BeautifulSoup(content, 'html.parser')
+                            self.post_process_images(soup_img)
+                            content = self._fmt(soup_img)
+                        xf.write_text(content, 'u8')
 
-                        with open(file_path, 'w', encoding='utf-8') as f:
-                            f.write(content)
             [logger.info(msg) for var, msg in [
                 (self.process_ruby_enabled, "Ruby标签规格化 √"),
                 (self.modify_html_enabled, "傍点转换ruby格式 √"),
@@ -698,22 +691,21 @@ class EpubProcessor:
                         else:  # 如果是 svg，替换 svg
                             tag.replace_with(new_div)
 
-    def modify_html(self, html, class_names):
-        soup = BeautifulSoup(html, 'html.parser')
+    def modify_html(self, soup, class_names):
         classes = [c.strip() for c in class_names.split('|') if c.strip()]
         for class_name in classes:
+            # 使用 soup.select 替代 re 匹配，更准确且快
             for span in soup.select(f'span[class~="{class_name}"], em[class~="{class_name}"]'): 
-                ruby = soup.new_tag('ruby')
-                if span.string:
-                    for char in span.string:
+                # 获取纯文本，防止 span 内部有其他标签导致 .string 为空
+                text_content = span.get_text() 
+                if text_content:
+                    ruby = soup.new_tag('ruby')
+                    for char in text_content:
                         ruby.append(soup.new_string(char))
                         rt_tag = soup.new_tag('rt')
                         rt_tag.append(soup.new_string("・"))
                         ruby.append(rt_tag)
-                else:
-                    ruby.append(soup.new_string(''))
-                span.replace_with(ruby)
-        return str(soup)
+                    span.replace_with(ruby)
 
     def show_exclude_dialog(self):
         """章节合并排除/正则追加分割章节 对话框"""
