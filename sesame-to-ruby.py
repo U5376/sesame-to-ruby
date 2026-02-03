@@ -714,7 +714,7 @@ class EpubProcessor:
         self._fcache, self._saved_hrefs = {}, {item[1] for item in getattr(self, "excluded_toc_entries", [])}
         if hasattr(self, "_exclude_tempdir"): shutil.rmtree(self._exclude_tempdir, ignore_errors=True)
         self._exclude_tempdir = tempfile.mkdtemp(); temp_path = Path(self._exclude_tempdir)
-        with zipfile.ZipFile(self.epub_path) as z: z.extractall(temp_path)
+        with zipfile.ZipFile(self.epub_path) as z: [z.extract(n, temp_path) for n in z.namelist() if n.lower().endswith(('.opf', '.ncx', '.xml', '.html', '.xhtml', '.htm'))]
         opf = self._get_opf_path(temp_path)
         EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
         self._init_toc, self._curr_toc = (t := self._parse_toc(BeautifulSoup(opf.read_text("utf-8"), "xml"), opf)), t.copy()
