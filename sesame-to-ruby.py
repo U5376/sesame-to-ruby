@@ -304,7 +304,7 @@ class EpubProcessor:
                     head.append(node)
                 if soup.body: [s.decompose() for s in soup.body.select('script')]
                 # 写入带规格化头的源码
-                xf.write_text(f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n{html.decode(formatter="html")}', 'u8')
+                xf.write_text(f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n{html.decode(formatter="minimal")}', 'u8')
                 xhtml_count += 1
             logger.info(f"已更新 {xhtml_count} 个Xhtml头部信息与样式链接")
         if is_lang_enabled or is_style_enabled:
