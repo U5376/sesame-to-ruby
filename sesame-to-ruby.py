@@ -289,7 +289,7 @@ class EpubProcessor:
             # 3. XHTML 规格化头部信息与CSS重建
             xhtml_count = 0
             for xf in [f for f in temp_dir.rglob("*") if f.suffix.lower() in ('.xhtml', '.html')]:
-                soup = BeautifulSoup(xf.read_text('u8'), 'html.parser')
+                soup = BeautifulSoup(xf.read_text('u8'), 'lxml-xml')
                 html = soup.find('html') or soup.append(soup.new_tag('html')) or soup.find('html')
                 # 规格化 HTML 属性
                 html.attrs = {'xmlns': "http://www.w3.org/1999/xhtml", 'xmlns:epub': "http://www.idpf.org/2007/ops", 'xml:lang': lang_val}
