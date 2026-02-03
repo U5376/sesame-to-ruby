@@ -152,7 +152,12 @@ class EpubProcessor:
         out = Path(ps[0]).parent / 'output'; out.mkdir(exist_ok=True)
         counts = {'ERROR': 0, 'WARNING': 0}
         logger_id = logger.add(lambda r: counts.__setitem__(r.record["level"].name, counts[r.record["level"].name]+1) or None, level='WARNING')
-        [logger.opt(exception=True).catch(lambda p=p: (setattr(self, 'epub_path', p), self.process_epub(str(out / Path(p).name))))() for p in ps]
+        for p in ps:
+            try:
+                self.epub_path = p
+                self.process_epub(str(out / Path(p).name))
+            except Exception:
+                logger.opt(exception=True).error(f"文件处理失败: {Path(p).name}")
         logger.remove(logger_id)
         logger.success(f"批量转换完成: 共{len(ps)}，ERROR:{counts['ERROR']}，WARNING:{counts['WARNING']}")
 
