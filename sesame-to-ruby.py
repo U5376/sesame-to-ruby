@@ -230,10 +230,12 @@ class EpubProcessor:
 
                         with open(file_path, 'w', encoding='utf-8') as f:
                             f.write(content)
-            logger.info("Ruby标签规格化 √")
-            logger.info("傍点转换ruby格式 √")
-            logger.info("正则替换 √")
-            logger.info("图片标签规格化 √")
+            [logger.info(msg) for var, msg in [
+                (self.process_ruby_enabled, "Ruby标签规格化 √"),
+                (self.modify_html_enabled, "傍点转换ruby格式 √"),
+                (None, "正则替换 √"), 
+                (self.process_images_enabled, "图片标签规格化 √")
+            ] if var is None or var.get()]
 
             # 空行处理
             self.process_blank_lines(temp_dir)
