@@ -722,7 +722,7 @@ class EpubProcessor:
 
         # 2. UI 构建
         dialog = tk.Toplevel(self.root); dialog.title("选择不合并条目 / 正则追加分割章节")
-        dialog.geometry(f"605x600+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}")
+        dialog.geometry(f"605x600+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"); dialog.focus_force()
         main_frame = ttk.Frame(dialog); main_frame.pack(fill="both", expand=True, padx=5, pady=5)
         tree = ttk.Treeview(main_frame, columns=("t", "h"), show="headings", selectmode="extended")
         sb = ttk.Scrollbar(main_frame, command=tree.yview); tree.configure(yscrollcommand=sb.set); sb.pack(side="right", fill="y")
@@ -852,7 +852,7 @@ class EpubProcessor:
             self._exclude_initialized = True
 
         d = tk.Toplevel(self.root); d.title("已排除的合并章节列表")
-        d.geometry(f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}")
+        d.geometry(f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"); d.focus_force()
         f_tree = ttk.Frame(d); f_tree.pack(fill="both", expand=True, padx=5, pady=5)
         tree = ttk.Treeview(f_tree, columns=("t", "h"), show="headings", selectmode="extended")
         sb = ttk.Scrollbar(f_tree, orient="vertical", command=tree.yview); tree.configure(yscrollcommand=sb.set)

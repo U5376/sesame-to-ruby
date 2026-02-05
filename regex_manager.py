@@ -364,7 +364,7 @@ class RegexManager:
         """ini配置文件管理窗口"""
         win = tk.Toplevel(self.root)
         win.title("配置文件管理")
-        win.geometry(f"450x300+{self.root.winfo_x()+200}+{self.root.winfo_y()+150}")
+        win.geometry(f"450x300+{self.root.winfo_x()+150}+{self.root.winfo_y()+150}"); win.focus_force()
         frame = ttk.Frame(win); frame.pack(fill="both", expand=True, padx=8, pady=8)
         tree = ttk.Treeview(frame, columns=("name", "path"), show="headings")
         [tree.heading(c, text=t) for c, t in zip(("name", "path"), ("文件名", "完整路径"))]
