@@ -6,93 +6,119 @@ import lxml.html
 
 class ClassList:
     def __init__(self, root, epub_path, get_temp, set_temp, append_temp):
-        self.root = root
-        self.epub_path = epub_path
-        self.get_temp_style_content = get_temp
-        self.set_temp_style_content = set_temp
-        self.append_temp_style_content = append_temp
+        self.root, self.epub_path = root, epub_path
+        self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
+        self.style_data, self.samples_data, self.counts_data = {}, {}, {}
+        self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
+        self.all_items_refs, self.n_map = [], {"": ""}
         self.show_class_list()
 
     def show_class_list(self):
         cw = tk.Toplevel(self.root)
         cw.title("html内样式收集分析")
-        cw.geometry(f"320x420+{self.root.winfo_x()+130}+{self.root.winfo_y()+60}")
+        cw.geometry(f"600x480+{self.root.winfo_x()+-30}+{self.root.winfo_y()+30}")
 
-        # 筛选输入框和按钮自适应窗口宽度
-        filter_frame = ttk.Frame(cw)
-        filter_frame.pack(fill="x", padx=3, pady=2)
+        pw = ttk.PanedWindow(cw, orient="horizontal")
+        pw.pack(fill="both", expand=True)
+        
+        # 左侧文件树
+        lf, rf = ttk.Frame(pw, width=150), ttk.Frame(pw, width=330)
+        [pw.add(f, weight=w) for f, w in [(lf, 1), (rf, 0)]]
+        
+        ftree = ttk.Treeview(lf, show="tree", selectmode="browse")
+        ftree.pack(side="left", fill="both", expand=True)
+        f_vsb = ttk.Scrollbar(lf, command=ftree.yview); f_vsb.pack(side="right", fill="y")
+        ftree.config(yscrollcommand=f_vsb.set)
+
+        filter_frame = ttk.Frame(rf); filter_frame.pack(fill="x", padx=3, pady=2)
         filter_var = tk.StringVar()
-        filter_entry = ttk.Entry(filter_frame, textvariable=filter_var, width=10)
-        filter_entry.pack(side="left", fill="x", expand=True)
+        ttk.Entry(filter_frame, textvariable=filter_var).pack(side="left", fill="x", expand=True)
 
-        tree_frame = ttk.Frame(cw)
-        tree_frame.pack(fill="both", expand=True, padx=3, pady=2)
-        tree = ttk.Treeview(tree_frame, show="tree", selectmode="extended")
+        tf = ttk.Frame(rf); tf.pack(fill="both", expand=True, padx=3, pady=2)
+        tree = ttk.Treeview(tf, columns=("count",), show="tree headings", selectmode="extended")
+        tree.heading("#0", text="类名", anchor="w"); tree.heading("count", text="总量", anchor="center")
+        tree.column("#0", width=200); tree.column("count", width=50, anchor="center")
         tree.grid(row=0, column=0, sticky="nsew")
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        vsb.grid(row=0, column=1, sticky="ns")
-        tree.configure(yscrollcommand=vsb.set)
-        tree_frame.columnconfigure(0, weight=1)
-        tree_frame.rowconfigure(0, weight=1)
+        vsb = ttk.Scrollbar(tf, command=tree.yview); vsb.grid(row=0, column=1, sticky="ns")
+        tree.config(yscrollcommand=vsb.set); tf.columnconfigure(0, weight=1); tf.rowconfigure(0, weight=1)
+        
+        ttk.Style().configure("Treeview", indent=14)
+        nodes = {k: tree.insert("", "end", text=k, open=(k == 'Class列表')) for k in self.cats}
+        class_to_iid = {}
 
-        style_data, used_classes, used_spans, used_images = {}, set(), set(), set()
-        css_pattern = re.compile(r'([^{]+)\{([^}]+)\}', re.DOTALL)
+        # 预览逻辑
+        def preview_file(e):
+            if not (sel := ftree.selection()) or not (p := ftree.item(sel[0], "tags")[0]) or p.endswith('/'): return
+            try:
+                with zipfile.ZipFile(self.epub_path, 'r') as z: content = z.read(p).decode('utf-8', 'ignore')
+                win = tk.Toplevel(cw); win.title(p)
+                win.geometry(f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}"); win.focus_force()
+                txt = tk.Text(win, font=('Consolas', 10), wrap="word") 
+                sv = ttk.Scrollbar(win, command=txt.yview); txt.config(yscrollcommand=sv.set)
+                sv.pack(side="right", fill="y"); txt.pack(side="left", fill="both", expand=True)
+                txt.insert("1.0", content); txt.config(state="disabled")
+            except Exception as ex: messagebox.showerror("错误", str(ex), parent=cw)
+        ftree.bind("<Double-1>", preview_file)
 
-        try:
-            with zipfile.ZipFile(self.epub_path, 'r') as archive:
-                for file_name in archive.namelist():
-                    # 处理css
-                    if file_name.endswith('.css'):
-                        with archive.open(file_name) as file:
-                            clean_css = re.sub(r'/\*.*?\*/', '', file.read().decode('utf-8', 'ignore'), flags=re.DOTALL)
-                            for selector, body in css_pattern.findall(clean_css):
-                                formatted_content = re.sub(r';\s*', ';\n  ', body.strip())
-                                for part in [s.strip() for s in selector.split(',')]:
-                                    for class_name in re.findall(r'\.([\w-]+)', part):
-                                        style_data.setdefault(class_name, {}).setdefault(file_name, []).append({'selector': part, 'content': formatted_content})
+        def parse_gen():
+            with zipfile.ZipFile(self.epub_path, 'r') as z:
+                nl = sorted(z.namelist())
+                [ (parts := p.split('/'), [ (cur := "/".join(parts[:i+1]), pre := "/".join(parts[:i]), 
+                   cur not in self.n_map and self.n_map.update({cur: ftree.insert(self.n_map[pre], "end", text=cur, tags=(cur if (i==len(parts)-1 and not p.endswith('/')) else cur+"/",))}),
+                   (i < len(parts)-1 and any(x.endswith(('.html', '.xhtml')) for x in nl if x.startswith(cur))) and ftree.item(self.n_map[cur], open=True)
+                  ) for i in range(len(parts))]) for p in nl ]
+                yield
+                for f in nl:
+                    # 提取css样式
+                    if f.endswith('.css'):
+                        b_txt = z.read(f).decode('utf-8', 'ignore')
+                        [[self.style_data.setdefault(c, {}).setdefault(f, []).append({'selector': p, 'content': re.sub(r';\s*', ';\n  ', b.strip())})
+                          for p in [s.strip() for s in sel.split(',')]
+                          for m in re.findall(r'(?:\.([\w-]+))|(?:\b([a-zA-Z1-6]+)\b)', p)
+                          for c in m if c] for sel, b in re.findall(r'([^{]+)\{([^}]+)\}', re.sub(r'/\*.*?\*/', '', b_txt, flags=re.DOTALL))]
                     # 处理xhtml 使用 XPath 仅提取带 class 的标签
-                    elif file_name.endswith(('.html', '.xhtml')):
-                        with archive.open(file_name) as file:
-                            html_tree = lxml.html.fromstring(file.read())
-                            for element in html_tree.xpath('//*[@class]'):
-                                class_list = element.get('class').split() # .split() 自动处理字符串并解决“只读首字母”问题
-                                used_classes.update(class_list)
-                                # 快速获取标签名并更新对应集合
-                                tag_name = element.tag.rsplit('}', 1)[-1]
-                                if tag_name == 'span': used_spans.update(class_list)
-                                elif tag_name == 'img': used_images.update(class_list)
-        except Exception as error:
-            messagebox.showerror("解析失败", f"错误: {error}", parent=cw)
+                    elif f.endswith(('.html', '.xhtml')):
+                        for el in lxml.html.fromstring(z.read(f)).xpath('//*[@class]'):
+                            tag, cls_list = el.tag.rsplit('}', 1)[-1].lower(), el.get('class').split()
+                            for c in cls_list:
+                                self.counts_data[c] = self.counts_data.get(c, 0) + 1
+                                [ (self.cats[k].add(c), key := (k, c),
+                                   tree.item(class_to_iid[key], values=(self.counts_data[c],)) if key in class_to_iid else
+                                   (class_to_iid.update({key: tree.insert(nodes[k], "end", text=c, values=(self.counts_data[c],))}),
+                                    self.all_items_refs.append((k, c, class_to_iid[key])),
+                                    # 字母顺序重排
+                                    ch := sorted(tree.get_children(nodes[k]), key=lambda x: tree.item(x, 'text').lower()),
+                                    [tree.move(child, nodes[k], idx) for idx, child in enumerate(ch)]))
+                                  for k, v in [('Class列表', 1), ('Span列表', tag=='span'), ('图片Class列表', tag=='img'), 
+                                               ('非P标签列表', tag!='p'), ('非P、img、body标签列表', tag not in ['p','img','body'])] if v ]
+                                if len(self.samples_data.get(c, [])) < 10:
+                                    s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
+                                    self.samples_data.setdefault(c, []).append(re.sub(r'\s+', ' ', s_raw)[:150])
+                        yield
 
-        # 界面填充
-        categories = {'Class列表': used_classes, 'Span列表': used_spans, '图片Class列表': used_images}
-        nodes = {title: (classes, tree.insert("", "end", text=title, open=True)) for title, classes in categories.items()}
-        all_items = [(title, name, tree.insert(node, "end", text=name)) 
-                     for title, (classes, node) in nodes.items() for name in sorted(classes)]
+        gen = parse_gen()
+        def run_step():
+            try: next(gen); cw.after(1, run_step)
+            except (StopIteration, Exception): pass
+        run_step()
 
-        def show_details(event):
-            if not (item := tree.identify_row(event.y) or (sel := tree.selection() and sel[0])):
-                return
-            if tree.parent(item) in [nodes[k][1] for k in ['Class列表', 'Span列表', '图片Class列表']]:
-                name = tree.item(item, "text")
-                details = [
-                    f"文件: {p}\n{r['selector']} {{\n" + 
-                    "\n".join(f"  {line.strip()}" for line in r['content'].split('\n') if line.strip()) + 
-                    "\n}\n\n"
-                    for p, rs in style_data.get(name, {}).items() for r in rs
-                ]
+        # 显示样式详情+实例
+        def show_details(event=None):
+            if not (item := tree.identify_row(event.y) if event else (tree.selection() or [None])[0]) or item in nodes.values(): return
+            name = tree.item(item, "text")
+            rules = [f"文件: {p}\n{r['selector']} {{\n" + "\n".join(f"  {l.strip()}" for l in r['content'].split('\n') if l.strip()) + "\n}" 
+                     for p, rs in self.style_data.get(name, {}).items() for r in rs]
 
-                win = tk.Toplevel(cw)
-                win.title(name)
-                win.geometry(f"350x180+{self.root.winfo_x()+160}+{self.root.winfo_y()+130}")
-                
-                f = ttk.Frame(win); f.pack(fill="both", expand=True, padx=5, pady=5)
-                t = tk.Text(f, wrap="word", font=('Consolas', 10))
-                t.insert("end", "".join(details) or f"未找到 {name} 的CSS定义")
-                t.config(state="disabled")
+            win = tk.Toplevel(cw); win.title(name); win.geometry(f"500x480+{self.root.winfo_x()+140}+{self.root.winfo_y()+80}"); win.focus_force()
+            pw = ttk.PanedWindow(win, orient="vertical")
+            pw.pack(fill="both", expand=True, padx=5, pady=5)
+            for i, (txt, wt) in enumerate([("\n\n".join(rules) or f"/* 未找到 {name} */", 6), ("\n\n".join(self.samples_data.get(name, [])), 10)]):
+                f = ttk.Frame(pw); pw.add(f, weight=wt)
+                t = tk.Text(f, height=1, font=('Consolas', 10 if i==0 else 9), bg="#ffffff" if i==0 else "#f9f9f9", wrap="word")
                 v = ttk.Scrollbar(f, command=t.yview); t.config(yscrollcommand=v.set)
+                t.insert("end", txt); t.config(state="disabled")
                 v.pack(side="right", fill="y"); t.pack(side="left", fill="both", expand=True)
-                win.protocol("WM_DELETE_WINDOW", lambda: [win.destroy(), tree.focus_set()])
+            win.protocol("WM_DELETE_WINDOW", lambda: [win.destroy(), tree.focus_set()])
         tree.bind("<Double-1>", show_details)
 
         def copy_selected():
@@ -100,8 +126,8 @@ class ClassList:
             details_list = []
             for i in items:
                 name = tree.item(i, "text")
-                if name in style_data:
-                    for _, rules in style_data[name].items():  # 将 path 改为 _，表示不读取文件路径
+                if name in self.style_data:
+                    for _, rules in self.style_data[name].items():  # 将 path 改为 _，表示不读取文件路径
                         for rule in rules:
                             lines = [f"  {line.strip()}" for line in rule['content'].split('\n') if line.strip()]
                             details_list.append(f"\n{rule['selector']} {{\n" + '\n'.join(lines) + "\n}")
@@ -117,14 +143,14 @@ class ClassList:
             style_lines = []
             for i in items:
                 name = tree.item(i, "text")
-                if name in style_data:
-                    for _, rules in style_data[name].items():
+                if name in self.style_data:
+                    for _, rules in self.style_data[name].items():
                         for rule in rules:
                             lines = [line.strip() for line in rule['content'].split('\n') if line.strip()]
                             style_lines.append(f"{rule['selector']} {{\n" + '\n'.join(lines) + "\n}\n")
-            new_content = '\n'.join(style_lines) + "\n"
-            self.append_temp_style_content(new_content)
-            messagebox.showinfo("写入", f"已追加 {len(items)} 个条目的详细样式到内存（临时style）", parent=cw)
+            info = ("选中的条目没有找到对应的CSS定义", f"已追加 {len(items)} 个条目的详细样式到内存（临时style）")
+            if style_lines: self.append_temp_style_content('\n'.join(style_lines) + "\n")
+            messagebox.showinfo("写入", info[bool(style_lines)], parent=cw)
             tree.focus_set()
 
         menu = tk.Menu(tree, tearoff=0)
@@ -141,17 +167,13 @@ class ClassList:
         def do_filter(*_):
             keyword = filter_var.get().strip().lower()
             tree.selection_remove(tree.selection())
-            for group, cls, iid in all_items:
-                show = False
-                if cls in style_data:  # 修复 KeyError
-                    for rules in style_data[cls].values():
-                        for rule in rules:
-                            if keyword in rule['selector'].lower() or keyword in rule['content'].lower():
-                                show = True
-                                break
+            for group, cls, iid in self.all_items_refs:
                 tree.detach(iid)
-                if show:
-                    tree.reattach(iid, nodes[group][1], "end")
+                # 提取所有相关的 CSS 文本
+                css_texts = [rule['selector'] + rule['content'] for rules in self.style_data.get(cls, {}).values() for rule in rules]
+                # 执行综合匹配：关键词为空、匹配类名或匹配 CSS 内容
+                if not keyword or keyword in cls.lower() or any(keyword in text.lower() for text in css_texts):
+                    tree.reattach(iid, nodes[group], "end")
         filter_var.trace_add("write", do_filter)
 
         # 编辑临时样式：弹出一个可编辑的Text窗口，显示全部暂存样式，编辑后自动保存
