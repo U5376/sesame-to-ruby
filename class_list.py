@@ -10,7 +10,7 @@ class ClassList:
         self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
         self.style_data, self.samples_data, self.counts_data = {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
-        self.all_items_refs, self.n_map = [], {"": ""}
+        self.all_items_refs, self.n_map, self.st = [], {"": ""}, {"#0": False, "count": False}
         self.show_class_list()
 
     def show_class_list(self):
@@ -24,39 +24,73 @@ class ClassList:
         # 左侧文件树
         lf, rf = ttk.Frame(pw, width=150), ttk.Frame(pw, width=330)
         [pw.add(f, weight=w) for f, w in [(lf, 1), (rf, 0)]]
-        
         ftree = ttk.Treeview(lf, show="tree", selectmode="browse")
         ftree.pack(side="left", fill="both", expand=True)
         f_vsb = ttk.Scrollbar(lf, command=ftree.yview); f_vsb.pack(side="right", fill="y")
         ftree.config(yscrollcommand=f_vsb.set)
-
+        # 右侧class列表
         filter_frame = ttk.Frame(rf); filter_frame.pack(fill="x", padx=3, pady=2)
         filter_var = tk.StringVar()
         ttk.Entry(filter_frame, textvariable=filter_var).pack(side="left", fill="x", expand=True)
-
         tf = ttk.Frame(rf); tf.pack(fill="both", expand=True, padx=3, pady=2)
         tree = ttk.Treeview(tf, columns=("count",), show="tree headings", selectmode="extended")
-        tree.heading("#0", text="类名", anchor="w"); tree.heading("count", text="总量", anchor="center")
+
+        # 排序逻辑函数
+        self.lc = None
+        def sort_col(col):
+            self.st[col] = (col == "#0") if col != self.lc else not self.st[col]
+            self.lc = col
+            for n in nodes.values():
+                items = sorted([(tree.set(c, "count"), tree.item(c, "text"), c) for c in tree.get_children(n)], 
+                               key=lambda x: int(x[0]) if col=="count" else x[1].lower(), reverse=not self.st[col])
+                [tree.move(it[2], n, i) for i, it in enumerate(items)]
+            [tree.heading(c, text=f"{'类名' if c=='#0' else '总量'}{(' ▲' if self.st[c] else ' ▼') if c==col else ''}") for c in ["#0", "count"]]
+
+        # 初始表头设置
+        tree.heading("#0", text="类名", anchor="w", command=lambda: sort_col("#0"))
+        tree.heading("count", text="总量", anchor="center", command=lambda: sort_col("count"))
         tree.column("#0", width=200); tree.column("count", width=50, anchor="center")
         tree.grid(row=0, column=0, sticky="nsew")
         vsb = ttk.Scrollbar(tf, command=tree.yview); vsb.grid(row=0, column=1, sticky="ns")
         tree.config(yscrollcommand=vsb.set); tf.columnconfigure(0, weight=1); tf.rowconfigure(0, weight=1)
-        
-        ttk.Style().configure("Treeview", indent=14)
-        nodes = {k: tree.insert("", "end", text=k, open=(k == 'Class列表')) for k in self.cats}
+
+        ttk.Style().configure("Treeview", indent=10) #调整Treeview缩进余白
+        # 默认展开控制
+        nodes = {k: tree.insert("", "end", text=k, open=(k in ['Class列表', 'Span列表', '图片Class列表'])) for k in self.cats}
         class_to_iid = {}
 
-        # 预览逻辑
+        # 预览逻辑+搜索框
         def preview_file(e):
             if not (sel := ftree.selection()) or not (p := ftree.item(sel[0], "tags")[0]) or p.endswith('/'): return
             try:
                 with zipfile.ZipFile(self.epub_path, 'r') as z: content = z.read(p).decode('utf-8', 'ignore')
                 win = tk.Toplevel(cw); win.title(p)
                 win.geometry(f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}"); win.focus_force()
-                txt = tk.Text(win, font=('Consolas', 10), wrap="word") 
+                sf = ttk.Frame(win); sf.pack(fill="x", padx=2, pady=2)
+                se = ttk.Entry(sf); se.pack(side="left", fill="x", expand=1)
+                sl = ttk.Label(sf, text="0/0"); sl.pack(side="right", padx=5)
+                [ttk.Button(sf, text=t, width=3, command=lambda r=v: do_find(r)).pack(side="right") for t, v in [("↓", 0), ("↑", 1)]]
+                txt = tk.Text(win, font=('Consolas', 10), wrap="word")
                 sv = ttk.Scrollbar(win, command=txt.yview); txt.config(yscrollcommand=sv.set)
-                sv.pack(side="right", fill="y"); txt.pack(side="left", fill="both", expand=True)
+                [f.pack(side=s, fill=y, expand=e) for f,s,y,e in [(sv,"right","y",0), (txt,"left","both",1)]]
                 txt.insert("1.0", content); txt.config(state="disabled")
+                [txt.tag_config(k, background=v) for k,v in [("m", "yellow"), ("cur", "orange")]]
+                def do_find(rev=False):
+                    [txt.tag_remove(t, "1.0", "end") for t in ("m", "cur")]
+                    if not (q := se.get()): return sl.config(text="0/0")
+                    res, s = [], "1.0"
+                    while (s := txt.search(q, s, "end", regexp=1)):
+                        res.append(s); s = f"{s}+1c"
+                    if not res: return sl.config(text="0/0")
+                    l_q = getattr(do_find, 'lq', "")
+                    do_find.i = (getattr(do_find, 'i', -1) + (-1 if rev else 1)) % len(res) if q == l_q else (0 if not rev else -1)
+                    do_find.lq, p_c = q, res[do_find.i]
+                    [txt.tag_add("m", r, f"{r}+{len(q)}c") for r in res]
+                    txt.tag_add("cur", p_c, f"{p_c}+{len(q)}c")
+                    txt.see(p_c); sl.config(text=f"{do_find.i+1}/{len(res)}")
+                # 键盘绑定：回车/下键=向下，Shift+回车/上键=向上
+                [se.bind(k, lambda e, r=v: do_find(r)) for k, v in [("<Return>", 0), ("<Shift-Return>", 1), ("<Down>", 0), ("<Up>", 1)]]
+                se.focus_set()
             except Exception as ex: messagebox.showerror("错误", str(ex), parent=cw)
         ftree.bind("<Double-1>", preview_file)
 
@@ -91,9 +125,9 @@ class ClassList:
                                     [tree.move(child, nodes[k], idx) for idx, child in enumerate(ch)]))
                                   for k, v in [('Class列表', 1), ('Span列表', tag=='span'), ('图片Class列表', tag=='img'), 
                                                ('非P标签列表', tag!='p'), ('非P、img、body标签列表', tag not in ['p','img','body'])] if v ]
-                                if len(self.samples_data.get(c, [])) < 10:
+                                if len(self.samples_data.get(c, [])) < 10: # 提取10个实例
                                     s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
-                                    self.samples_data.setdefault(c, []).append(re.sub(r'\s+', ' ', s_raw)[:150])
+                                    self.samples_data.setdefault(c, []).append((f, re.sub(r'\s+', ' ', s_raw)[:150]))
                         yield
 
         gen = parse_gen()
@@ -109,10 +143,16 @@ class ClassList:
             rules = [f"文件: {p}\n{r['selector']} {{\n" + "\n".join(f"  {l.strip()}" for l in r['content'].split('\n') if l.strip()) + "\n}" 
                      for p, rs in self.style_data.get(name, {}).items() for r in rs]
 
+            gps = {}
+            [(gps.setdefault(f, []).append(s)) for f, s in self.samples_data.get(name, [])]
+            samples = [f"【文件: {f}】\n" + "\n".join(ss) for f, ss in gps.items()]
+
             win = tk.Toplevel(cw); win.title(name); win.geometry(f"500x480+{self.root.winfo_x()+140}+{self.root.winfo_y()+80}"); win.focus_force()
             pw = ttk.PanedWindow(win, orient="vertical")
             pw.pack(fill="both", expand=True, padx=5, pady=5)
-            for i, (txt, wt) in enumerate([("\n\n".join(rules) or f"/* 未找到 {name} */", 6), ("\n\n".join(self.samples_data.get(name, [])), 10)]):
+            
+            # 实例显示 使用组装好的 samples 变量
+            for i, (txt, wt) in enumerate([("\n\n".join(rules) or f"/* 未找到 {name} */", 6), ("\n\n".join(samples), 10)]):
                 f = ttk.Frame(pw); pw.add(f, weight=wt)
                 t = tk.Text(f, height=1, font=('Consolas', 10 if i==0 else 9), bg="#ffffff" if i==0 else "#f9f9f9", wrap="word")
                 v = ttk.Scrollbar(f, command=t.yview); t.config(yscrollcommand=v.set)
