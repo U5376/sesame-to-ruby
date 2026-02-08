@@ -63,6 +63,21 @@ class ClassList:
         def preview_file(e):
             if not (sel := ftree.selection()) or not (p := ftree.item(sel[0], "tags")[0]) or p.endswith('/'): return
             try:
+                # 图片读取逻辑:解压至临时文件并调用默认图片查看器
+                import os, tempfile
+                exts = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
+                with zipfile.ZipFile(self.epub_path, 'r') as z:
+                    if p.lower().endswith(exts):
+                        # 建立基于EPUB路径指纹的唯一临时目录
+                        td = os.path.join(tempfile.gettempdir(), f"epub_img_{hash(self.epub_path)}")
+                        if not os.path.exists(td):
+                            os.makedirs(td)
+                            # 一次性全量解压 (仅在目录不存在时执行)
+                            [open(os.path.join(td, os.path.basename(x)), 'wb').write(z.read(x)) 
+                             for x in z.namelist() if x.lower().endswith(exts)]
+                        target = os.path.join(td, os.path.basename(p))
+                        return os.startfile(target) if hasattr(os, 'startfile') else __import__('subprocess').run(['open', target])
+                #  内存读取预览文本逻辑 显示内容+正则搜索
                 with zipfile.ZipFile(self.epub_path, 'r') as z: content = z.read(p).decode('utf-8', 'ignore')
                 win = tk.Toplevel(cw); win.title(p)
                 win.geometry(f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}"); win.focus_force()
