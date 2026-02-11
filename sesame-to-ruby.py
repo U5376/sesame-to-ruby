@@ -307,6 +307,8 @@ class EpubProcessor:
                 xf.write_text(f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n{html.decode(formatter="minimal")}', 'u8')
                 xhtml_count += 1
             logger.info(f"已更新 {xhtml_count} 个Xhtml头部信息与样式链接")
+        # 去除metadata下子标签文本首尾的换行跟空格
+        if opf_soup.metadata: [setattr(t, 'string', t.string.strip()) for t in opf_soup.metadata.find_all() if t.string]
         if is_lang_enabled or is_style_enabled:
             opf_path.write_text(str(opf_soup), 'u8')
 
@@ -782,7 +784,7 @@ class EpubProcessor:
 
     def _internal_split_logic(self, patterns, current_toc, temp_dir):
         """章节分割预览逻辑"""
-        try: rules = re.compile("|".join(f"(?:{p})" for p in patterns), re.DOTALL)
+        try: rules = re.compile("|".join(f"(?:{p})" for p in patterns))
         except: return None
         if not hasattr(self, "_fcache"): self._fcache = {}
         opf, new_toc, dep = self._get_opf_path(Path(temp_dir)), [], 0
@@ -800,7 +802,7 @@ class EpubProcessor:
         """正则匹配子章节追加分割逻辑"""
         if not (rules := getattr(self, '_split_rules', [])): return current_toc
         opf_p, last_href, total = self._get_opf_path(Path(temp_dir)), None, 0
-        regex = re.compile("|".join(f"(?:{r[0]})" for r in rules if r), re.DOTALL)
+        regex = re.compile("|".join(f"(?:{r[0]})" for r in rules if r))
         lookup = {Path(t['href'].split('#')[0]).name: t for t in (current_toc or [])}
         TPL = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n'
                '<html xml:lang="{l}" xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">\n'
