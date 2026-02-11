@@ -93,15 +93,15 @@ class ClassList:
                 def do_find(rev=False):
                     [txt.tag_remove(t, "1.0", "end") for t in ("m", "cur")]
                     if not (q := se.get()): return sl.config(text="0/0")
-                    res, s = [], "1.0"
-                    while (s := txt.search(q, s, "end", regexp=1)):
-                        res.append(s); s = f"{s}+1c"
+                    res, s, n = [], "1.0", tk.IntVar()
+                    while (s := txt.search(q, s, "end", regexp=1, count=n)):
+                        res.append((s, n.get())); s = f"{s}+{res[-1][1]}c"
                     if not res: return sl.config(text="0/0")
                     l_q = getattr(do_find, 'lq', "")
                     do_find.i = (getattr(do_find, 'i', -1) + (-1 if rev else 1)) % len(res) if q == l_q else (0 if not rev else -1)
-                    do_find.lq, p_c = q, res[do_find.i]
-                    [txt.tag_add("m", r, f"{r}+{len(q)}c") for r in res]
-                    txt.tag_add("cur", p_c, f"{p_c}+{len(q)}c")
+                    do_find.lq, (p_c, p_l) = q, res[do_find.i]
+                    [txt.tag_add("m", r, f"{r}+{rl}c") for r, rl in res]
+                    txt.tag_add("cur", p_c, f"{p_c}+{p_l}c")
                     txt.see(p_c); sl.config(text=f"{do_find.i+1}/{len(res)}")
                 # 键盘绑定：回车/下键=向下，Shift+回车/上键=向上
                 [se.bind(k, lambda e, r=v: do_find(r)) for k, v in [("<Return>", 0), ("<Shift-Return>", 1), ("<Down>", 0), ("<Up>", 1)]]
