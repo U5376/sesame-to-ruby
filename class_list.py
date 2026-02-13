@@ -1,4 +1,8 @@
+import atexit
+import os
 import re
+import shutil
+import tempfile
 import zipfile
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -64,23 +68,33 @@ class ClassList:
             if not (sel := ftree.selection()) or not (p := ftree.item(sel[0], "tags")[0]) or p.endswith('/'): return
             try:
                 # 图片读取逻辑:解压至临时文件并调用默认图片查看器
-                import os, tempfile
                 exts = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
-                with zipfile.ZipFile(self.epub_path, 'r') as z:
-                    if p.lower().endswith(exts):
-                        # 建立基于EPUB路径指纹的唯一临时目录
-                        td = os.path.join(tempfile.gettempdir(), f"epub_img_{hash(self.epub_path)}")
-                        if not os.path.exists(td):
-                            os.makedirs(td)
-                            # 一次性全量解压 (仅在目录不存在时执行)
-                            [open(os.path.join(td, os.path.basename(x)), 'wb').write(z.read(x)) 
-                             for x in z.namelist() if x.lower().endswith(exts)]
-                        target = os.path.join(td, os.path.basename(p))
-                        return os.startfile(target) if hasattr(os, 'startfile') else __import__('subprocess').run(['open', target])
+                if p.lower().endswith(exts):
+                    # 建立基于EPUB路径指纹的唯一临时目录
+                    td = os.path.join(tempfile.gettempdir(), f"epub_img_{hash(self.epub_path)}")
+                    if not os.path.exists(td):
+                        os.makedirs(td)
+                        # 注册清理逻辑，d=td 利用默认参数捕获当前路径
+                        atexit.register(lambda d=td: shutil.rmtree(d, ignore_errors=True))
+                        # 一次性全量解压(这里可能需要性能优化 改成异步处理或者按需解压)
+                        with zipfile.ZipFile(self.epub_path, 'r') as z:
+                            [open(os.path.join(td, os.path.basename(x)), 'wb').write(z.read(x)) for x in z.namelist() if x.lower().endswith(exts)]
+                    target = os.path.join(td, os.path.basename(p))
+                    return os.startfile(target) if hasattr(os, 'startfile') else __import__('subprocess').run(['open', target])
                 #  内存读取预览文本逻辑 显示内容+正则搜索
-                with zipfile.ZipFile(self.epub_path, 'r') as z: content = z.read(p).decode('utf-8', 'ignore')
-                win = tk.Toplevel(cw); win.title(p)
-                win.geometry(f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}"); win.focus_force()
+                win = tk.Toplevel(cw); win.geometry(f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}"); win.focus_force()
+                
+                #定义跳过图片的获取逻辑 (用于左右键切换)
+                def get_next_text(rev):
+                    bro = ftree.get_children(ftree.parent(ftree.selection()[0]))
+                    idx = bro.index(ftree.selection()[0])
+                    valid = [b for b in bro if not (p := ftree.item(b, "tags")[0].lower()).endswith(exts) and not p.endswith('/')]
+                    if not valid: return ftree.selection()[0]
+                    curr_sel = ftree.selection()[0]
+                    if curr_sel in valid:
+                        return valid[(valid.index(curr_sel) + (-1 if rev else 1)) % len(valid)]
+                    return valid[(idx + (-1 if rev else 0)) % len(valid)]
+
                 sf = ttk.Frame(win); sf.pack(fill="x", padx=2, pady=2)
                 se = ttk.Entry(sf); se.pack(side="left", fill="x", expand=1)
                 sl = ttk.Label(sf, text="0/0"); sl.pack(side="right", padx=5)
@@ -88,7 +102,6 @@ class ClassList:
                 txt = tk.Text(win, font=('Consolas', 10), wrap="word")
                 sv = ttk.Scrollbar(win, command=txt.yview); txt.config(yscrollcommand=sv.set)
                 [f.pack(side=s, fill=y, expand=e) for f,s,y,e in [(sv,"right","y",0), (txt,"left","both",1)]]
-                txt.insert("1.0", content); txt.config(state="disabled")
                 [txt.tag_config(k, background=v) for k,v in [("m", "yellow"), ("cur", "orange")]]
                 def do_find(rev=False):
                     [txt.tag_remove(t, "1.0", "end") for t in ("m", "cur")]
@@ -103,9 +116,17 @@ class ClassList:
                     [txt.tag_add("m", r, f"{r}+{rl}c") for r, rl in res]
                     txt.tag_add("cur", p_c, f"{p_c}+{p_l}c")
                     txt.see(p_c); sl.config(text=f"{do_find.i+1}/{len(res)}")
-                # 键盘绑定：回车/下键=向下，Shift+回车/上键=向上
+
+                def load_content():
+                    cp = ftree.item(ftree.selection()[0], "tags")[0]; win.title(cp)
+                    with zipfile.ZipFile(self.epub_path, 'r') as z: content = z.read(cp).decode('utf-8', 'ignore')
+                    txt.config(state="normal"); txt.delete("1.0", "end"); txt.insert("1.0", content); txt.config(state="disabled")
+                    do_find()
+
+                # 键盘绑定：回车/下键=向下，Shift+回车/上键=向上 左右键绑定 使用 get_next_text 自动过滤图片
+                [win.bind(k, lambda e, r=v: [ftree.selection_set(get_next_text(r)), ftree.see(ftree.selection()[0]), load_content()]) for k, v in [("<Left>", 1), ("<Right>", 0)]]
                 [se.bind(k, lambda e, r=v: do_find(r)) for k, v in [("<Return>", 0), ("<Shift-Return>", 1), ("<Down>", 0), ("<Up>", 1)]]
-                se.focus_set()
+                se.focus_set(); load_content()
             except Exception as ex: messagebox.showerror("错误", str(ex), parent=cw)
         ftree.bind("<Double-1>", preview_file)
 
@@ -153,27 +174,27 @@ class ClassList:
 
         # 显示样式详情+实例
         def show_details(event=None):
-            if not (item := tree.identify_row(event.y) if event else (tree.selection() or [None])[0]) or item in nodes.values(): return
-            name = tree.item(item, "text")
-            rules = [f"文件: {p}\n{r['selector']} {{\n" + "\n".join(f"  {l.strip()}" for l in r['content'].split('\n') if l.strip()) + "\n}" 
-                     for p, rs in self.style_data.get(name, {}).items() for r in rs]
+            if not (item := (tree.identify_row(event.y) if event else (tree.selection() or [None])[0])) or item in nodes.values(): return
+            win = tk.Toplevel(cw); win.geometry(f"500x480+{self.root.winfo_x()+140}+{self.root.winfo_y()+80}"); win.focus_force()
+            # 获取下一个节点的 lambda，用于左右键切换
+            get_nxt = lambda r: (b := tree.get_children(tree.parent(tree.selection()[0])))[(b.index(tree.selection()[0]) + (-1 if r else 1)) % len(b)]
 
-            gps = {}
-            [(gps.setdefault(f, []).append(s)) for f, s in self.samples_data.get(name, [])]
-            samples = [f"【文件: {f}】\n" + "\n".join(ss) for f, ss in gps.items()]
-
-            win = tk.Toplevel(cw); win.title(name); win.geometry(f"500x480+{self.root.winfo_x()+140}+{self.root.winfo_y()+80}"); win.focus_force()
-            pw = ttk.PanedWindow(win, orient="vertical")
-            pw.pack(fill="both", expand=True, padx=5, pady=5)
-            
-            # 实例显示 使用组装好的 samples 变量
-            for i, (txt, wt) in enumerate([("\n\n".join(rules) or f"/* 未找到 {name} */", 6), ("\n\n".join(samples), 10)]):
-                f = ttk.Frame(pw); pw.add(f, weight=wt)
-                t = tk.Text(f, height=1, font=('Consolas', 10 if i==0 else 9), bg="#ffffff" if i==0 else "#f9f9f9", wrap="word")
-                v = ttk.Scrollbar(f, command=t.yview); t.config(yscrollcommand=v.set)
-                t.insert("end", txt); t.config(state="disabled")
-                v.pack(side="right", fill="y"); t.pack(side="left", fill="both", expand=True)
-            win.protocol("WM_DELETE_WINDOW", lambda: [win.destroy(), tree.focus_set()])
+            pw = ttk.PanedWindow(win, orient="vertical"); pw.pack(fill="both", expand=True, padx=5, pady=5)
+            ts = [tk.Text(f := ttk.Frame(pw), height=1, font=('Consolas', 10 if i==0 else 9), bg="#ffffff" if i==0 else "#f9f9f9", wrap="word") for i in range(2)]
+            [ (pw.add(t.master, weight=w), (v := ttk.Scrollbar(t.master, command=t.yview)).pack(side="right", fill="y"), 
+               t.config(yscrollcommand=v.set), t.pack(side="left", fill="both", expand=True)) for t, w in zip(ts, [6, 10]) ]
+            def update_view():
+                name = tree.item(tree.selection()[0], "text"); win.title(name)
+                rules = [f"文件: {p}\n{r['selector']} {{\n" + "\n".join(f"  {l.strip()}" for l in r['content'].split('\n') if l.strip()) + "\n}" 
+                         for p, rs in self.style_data.get(name, {}).items() for r in rs]
+                # 组装实例数据：利用 setdefault 进行分组
+                gps = {}; [gps.setdefault(f, []).append(s) for f, s in self.samples_data.get(name, [])]
+                samples = [f"【文件: {f}】\n" + "\n".join(ss) for f, ss in gps.items()]
+                for t, cnt in zip(ts, ["\n\n".join(rules) or f"/* 未找到 {name} */", "\n\n".join(samples)]):
+                    t.config(state="normal"); t.delete("1.0", "end"); t.insert("end", cnt); t.config(state="disabled")
+            # 绑定键盘和关闭协议
+            [win.bind(k, lambda e, r=v: [tree.selection_set(get_nxt(r)), tree.see(tree.selection()[0]), update_view()]) for k, v in [("<Left>", 1), ("<Right>", 0)]]
+            win.protocol("WM_DELETE_WINDOW", lambda: [win.destroy(), tree.focus_set()]); update_view()
         tree.bind("<Double-1>", show_details)
 
         def copy_selected():
@@ -235,7 +256,7 @@ class ClassList:
         def edit_temp_style():
             win = tk.Toplevel(cw)
             win.title("编辑临时样式")
-            win.geometry(f"400x280+{cw.winfo_x()+60}+{cw.winfo_y()+60}")
+            win.geometry(f"400x280+{cw.winfo_x()+60}+{cw.winfo_y()+60}"); win.focus_force()
             frame = ttk.Frame(win)
             frame.pack(fill="both", expand=True, padx=5, pady=5)
             text = tk.Text(frame, wrap="word", font=('Consolas', 10))
