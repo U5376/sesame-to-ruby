@@ -125,7 +125,7 @@ class ClassList:
 
                 # 键盘绑定：回车/下键=向下，Shift+回车/上键=向上 左右键绑定 使用 get_next_text 自动过滤图片
                 [win.bind(k, lambda e, r=v: [ftree.selection_set(get_next_text(r)), ftree.see(ftree.selection()[0]), load_content()]) for k, v in [("<Left>", 1), ("<Right>", 0)]]
-                [se.bind(k, lambda e, r=v: do_find(r)) for k, v in [("<Return>", 0), ("<Shift-Return>", 1), ("<Down>", 0), ("<Up>", 1)]]
+                (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(500, lambda: do_find(0)))))
                 se.focus_set(); load_content()
             except Exception as ex: messagebox.showerror("错误", str(ex), parent=cw)
         ftree.bind("<Double-1>", preview_file)
