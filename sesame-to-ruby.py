@@ -740,28 +740,32 @@ class EpubProcessor:
                 if e['href'] in self._saved_hrefs: tree.selection_add(iid)
         def run_splits():
             update_mem(); self._curr_toc, self._split_rules = self._init_toc.copy(), []
-            p_list = [e.get().strip() for e in regex_entries if e.get().strip()]
-            [self._split_rules.append((p, '分割章节{idx}', 1)) for p in p_list]
-            if p_list and (nt := self._internal_split_logic(p_list, self._curr_toc, temp_path)): self._curr_toc = nt
+            for cb, en in regex_entries:
+                if (p := en.get().strip()): self._split_rules.append((p, '分割章节{idx}', 2 if cb.get() == "层级2(子章节)" else 1))
+            patterns = [r[0] for r in self._split_rules]
+            if patterns and (nt := self._internal_split_logic(patterns, self._curr_toc, temp_path, self._split_rules)): self._curr_toc = nt
             refresh()
         # 正则输入区
         regex_entries, reg_frame = [], ttk.Frame(dialog); reg_frame.pack(fill="x", padx=5)
-        def add_row(txt=""):
+        def add_row(txt="", level=2):
             row = ttk.Frame(reg_frame); row.pack(fill="x", pady=1)
-            en = tk.Entry(row); en.pack(side="left", fill="x", expand=True, padx=2); en.insert(0, txt); regex_entries.append(en)
+            cb = ttk.Combobox(row, values=("层级2(子章节)", "层级1(同级)"), state="readonly", width=12)
+            cb.pack(side="left", padx=2); cb.set("层级2(子章节)" if level == 2 else "层级1(同级)")
+            en = tk.Entry(row); en.pack(side="left", fill="x", expand=True, padx=2); en.insert(0, txt); regex_entries.append((cb, en))
             m = tk.Menu(dialog, tearoff=0); m.add_command(label="新增正则框", command=add_row)
-            m.add_command(label="删除正则条目", command=lambda: [row.destroy(), regex_entries.remove(en), run_splits()] if len(regex_entries)>1 else [en.delete(0, 'end'), run_splits()])
+            m.add_command(label="删除正则条目", command=lambda: [row.destroy(), regex_entries.remove((cb, en)), run_splits()] if len(regex_entries)>1 else [en.delete(0, 'end'), run_splits()])
             m.add_command(label="粘贴并预览", command=lambda: [en.delete(0, 'end'), en.insert(0, dialog.clipboard_get()), run_splits()])
-            en.bind("<Button-3>", lambda e: m.post(e.x_root, e.y_root)); en.bind("<Return>", lambda e: run_splits())
+            en.bind("<Button-3>", lambda e: m.post(e.x_root, e.y_root)); en.bind("<Return>", lambda e: run_splits()); cb.bind("<<ComboboxSelected>>", lambda e: run_splits())
         tree.bind("<Button-1>", lambda e: (i:=tree.identify_row(e.y)) and [tree.selection_remove(i) if i in tree.selection() else tree.selection_add(i), update_mem()] and "break")
-        [add_row(r) for r in (getattr(self, "_saved_regex_list", []) or [""])]; run_splits()
+        [add_row(r, getattr(self, "_saved_regex_levels", [])[i] if len(getattr(self, "_saved_regex_levels", [])) > i else 2) for i, r in enumerate(getattr(self, "_saved_regex_list", []) or [""])]; run_splits()
         # 底部按钮
         btn_frame = ttk.Frame(dialog); btn_frame.pack(side="bottom", fill="x", pady=10)
         inner_box = ttk.Frame(btn_frame); inner_box.pack(anchor="center")
         ttk.Button(inner_box, text="预览全部正则追加、分割章节", command=run_splits).pack(side="left", padx=5)
         def on_confirm():
-            run_splits()
-            update_mem(); self._saved_regex_list = [e.get().strip() for e in regex_entries if e.get().strip()] or [""]
+            run_splits(); update_mem()
+            self._saved_regex_list = [en.get().strip() for _, en in regex_entries if en.get().strip()] or [""]
+            self._saved_regex_levels = [2 if cb.get() == "层级2(子章节)" else 1 for cb, en in regex_entries]
             exist = {i[1] for i in getattr(self, "excluded_toc_entries", [])}
             new_items = [(tree.item(i)["values"][0], tree.item(i)["values"][1]) for i in tree.selection()]
             self.excluded_toc_entries = getattr(self, "excluded_toc_entries", []) + [x for x in new_items if x[1] not in exist]
@@ -782,20 +786,23 @@ class EpubProcessor:
         t = soup.get_text().replace('\u3000', ' ').replace('\xa0', ' ').strip() # 直接取 text，并处理全角/半角空格
         return ' '.join(t.split()) # 将多个连续空格合并为一个
 
-    def _internal_split_logic(self, patterns, current_toc, temp_dir):
+    def _internal_split_logic(self, patterns, current_toc, temp_dir, split_rules=None):
         """章节分割预览逻辑"""
         try: rules = re.compile("|".join(f"(?:{p})" for p in patterns))
         except: return None
         if not hasattr(self, "_fcache"): self._fcache = {}
-        opf, new_toc, dep = self._get_opf_path(Path(temp_dir)), [], 0
+        opf, new_toc, dep, s_rules = self._get_opf_path(Path(temp_dir)), [], 0, split_rules or []
         lookup = {t['href'].split('#')[0].split('/')[-1]: t for t in current_toc}
         for hf in self._get_spine_ordered_files(opf):
             if (n := hf.name) in lookup: new_toc.append(e := lookup[n]); dep = e.get('depth', 0)
             if n not in self._fcache: self._fcache[n] = hf.read_text('utf-8', 'ignore')
             if rules.search(c := self._fcache[n]):
-                [new_toc.append({'title': self._clean_title(m.group()) or f"Sec {i}", 
-                                 'href': f"{hf.stem}_spt_{i:03d}.xhtml", 'depth': dep+1}) 
-                 for i, m in enumerate(rules.finditer(c), 1)]
+                for i, m in enumerate(rules.finditer(c), 1):
+                    # 匹配层级(1=同级, 2=子级)，计算相对深度
+                    matched = m.group()
+                    lvl = next((r[2] for r in s_rules if re.search(f"(?:{r[0]})", matched)), 2)
+                    new_toc.append({'title': self._clean_title(matched) or f"Sec {i}", 
+                                    'href': f"{hf.stem}_spt_{i:03d}.xhtml", 'depth': dep + lvl - 1})
         return new_toc
 
     def _apply_regex_split(self, temp_dir, current_toc=None):
@@ -819,10 +826,18 @@ class EpubProcessor:
             logger.debug(f"分割文件: {n} | 注入锚点: {last_href}")
             hf.write_text(raw[:ms[0].start()].split("</body>")[0] + "\n</body>\n</html>", 'utf-8')
             ivs, subs, cur_h = [m.start() for m in ms] + [len(raw)], [], hf.relative_to(opf_p.parent).as_posix()
+            # 依规则原序提取子章节信息 (1=同级/父, 2=子级)
             for i, m in enumerate(ms):
                 new_f = hf.parent / f"{hf.stem}_spt_{i+1:03d}.xhtml"
                 new_f.write_text(TPL.format(l=lang, t=title, c=raw[ivs[i]:ivs[i+1]].split("</body>")[0].strip()), 'utf-8')
-                subs.append({'id': new_f.stem.replace('.', '_'), 'href': new_f.relative_to(opf_p.parent).as_posix(), 't': m.group()})
+                # 直接从 rules 匹配层级 (r[0]=pattern, r[2]=level)，匹配不到则默认为 2
+                matched = m.group()
+                subs.append({
+                    'id': new_f.stem.replace('.', '_'), 
+                    'href': new_f.relative_to(opf_p.parent).as_posix(), 
+                    'title': self._clean_title(matched), 
+                    'depth': next((r[2] for r in rules if re.search(f"(?:{r[0]})", matched)), 2)
+                })
             # OPF 原位插入(Manifest 紧跟原文件，Spine 保持顺序)
             soup = BeautifulSoup(opf_p.read_text('utf-8'), 'xml')
             if (old_it := soup.find('item', href=cur_h)) and (old_rf := soup.find('itemref', idref=old_it['id'])):
@@ -832,8 +847,8 @@ class EpubProcessor:
                         old_it = ni
                 [old_rf.insert_after(soup.new_tag('itemref', idref=s['id'])) for s in reversed(subs)]
                 opf_p.write_text(str(soup), 'utf-8')
-            try: total += (EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, [{'id':x['id'],'href':x['href'],'title':self._clean_title(x['t'])} for x in subs]) or 0)
-            except: pass
+            try: total += (EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, subs) or 0)
+            except Exception as e: logger.error(f"插入章节失败: {e}")
         if total > 0: logger.info(f"追加/分割章节完成: 共 {total} 条子章节")
         return current_toc
 

@@ -361,41 +361,49 @@ class EpubNCXGenerator:
 
     @staticmethod
     def insert_sub_chapters(opf_path, parent_href, sub_chapters):
-        """插入子章节到指定父章节下"""
+        """插入子章节(支持层级: 1=同级并更新父节点, 2=子级)"""
         if not sub_chapters or not (ps := EpubNCXGenerator._find_nav_path(opf_path)): return 0
         target_fn, added_this_time = Path(parent_href.split('#')[0]).name, 0
-        
-        # ncx 处理：解析 -> 内存递归插入 -> 重写ncx格式
+
+        # ncx 处理：解析 -> 内存递归插入 -> 重写ncx格式.按顺序根据 depth 决定是插入兄弟列表还是子列表
         if (nx_p := ps.get('ncx')) and nx_p.exists():
             entries = EpubNCXGenerator._parse_ncx_to_entries(nx_p)
             def inject(nodes):
-                for n in nodes:
+                for i, n in enumerate(nodes):
                     if Path(n['href'].split('#')[0]).name == target_fn:
-                        ex_h = {c['href'] for c in n['children']}
-                        n['children'].extend(new := [{'id': s['id'], 'title': BeautifulSoup(s['title'], 'html.parser').get_text(strip=True), 
-                                                      'href': s['href'], 'children': []} for s in sub_chapters if s['href'] not in ex_h])
-                        return len(new)
+                        cur, idx, cnt = n, i + 1, 0 # cur:当前父节点, idx:插入位置索引
+                        for s in sub_chapters:
+                            new = {'id': s['id'], 'title': BeautifulSoup(s['title'], 'html.parser').get_text(strip=True), 
+                                   'href': s['href'], 'children': []}
+                            if s.get('depth', 2) == 1: # 1级: 插入nodes列表(兄弟) 并更新当前父节点
+                                nodes.insert(idx, new); cur, idx = new, idx + 1
+                            else: cur['children'].append(new) # 2级: 插入当前父节点下
+                            cnt += 1
+                        return cnt
                     if (res := inject(n['children'])) is not None: return res
             if (cnt := inject(entries)) is not None:
                 nx_p.write_text(EpubNCXGenerator._create_ncx_content(EpubNCXGenerator._get_uid_from_opf(opf_path), entries, 
                                 EpubNCXGenerator._get_book_title_from_opf(opf_path)), 'utf-8')
-                logger.debug(f"成功在 {target_fn} 下追加【{cnt}】个子章节")
+                logger.debug(f"ncx:在 {target_fn} 后续追加 {cnt} 个章节")
                 added_this_time = cnt
 
-        # nav追加插入章节 没测试 全交给bs了
+        # nav追加插入章节(简易测试没问题 不常用 可能会出问题)
         if (nv_p := ps.get('nav')) and nv_p.exists():
             sp = BeautifulSoup(nv_p.read_text('utf-8'), 'html.parser')
-            if (ta := sp.find('a', href=lambda h: h and Path(h.split('#')[0]).name == target_fn)) and (li := ta.parent):
-                lst = li.find(['ol', 'ul']) or li.append(sp.new_tag('ol')) or li.find('ol')
-                ex_h, added_nav = {a.get('href') for a in lst.find_all('a')}, 0
+            if (ta := sp.find('a', href=lambda h: h and Path(h.split('#')[0]).name == target_fn)) and (cur_li := ta.parent):
+                cur_ol, cnt = cur_li.find(['ol', 'ul']), 0
                 for s in sub_chapters:
-                    if s['href'] not in ex_h:
-                        (ni := sp.new_tag('li')).append(sp.new_tag('a', href=s['href'], string=s['title']))
-                        lst.append(ni); added_nav += 1
-                if added_nav > 0:
+                    (nl := sp.new_tag('li')).append(sp.new_tag('a', href=s['href'], string=s['title']))
+                    if s.get('depth', 2) == 1: # 1级: 插在当前li后, 变为新父节点, 重置子列表容器
+                        cur_li.insert_after(nl); cur_li, cur_ol = nl, None
+                    else: # 2级: 放入子列表容器(若无则创建)
+                        if not cur_ol: cur_li.append(cur_ol := sp.new_tag('ol'))
+                        cur_ol.append(nl)
+                    cnt += 1
+                if cnt:
                     nv_p.write_text(sp.decode(formatter='html'), 'utf-8')
-                    logger.debug(f"nav 追加子章节: {target_fn} (+{added_nav})")
-                    added_this_time = max(added_this_time, added_nav)
+                    logger.debug(f"nav: 在 {target_fn} 后续追加 {cnt} 个章节")
+                    added_this_time = max(added_this_time, cnt)
         return added_this_time # 返回给外层循环累计
 
     @staticmethod
