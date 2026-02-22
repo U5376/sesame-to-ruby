@@ -792,9 +792,11 @@ class EpubProcessor:
         except: return None
         if not hasattr(self, "_fcache"): self._fcache = {}
         opf, new_toc, dep, s_rules = self._get_opf_path(Path(temp_dir)), [], 0, split_rules or []
+        strike = lambda t: "".join([c + "\u0336" for c in t])
         lookup = {t['href'].split('#')[0].split('/')[-1]: t for t in current_toc}
         for hf in self._get_spine_ordered_files(opf):
-            if (n := hf.name) in lookup: new_toc.append(e := lookup[n]); dep = e.get('depth', 0)
+            if (n := hf.name) in lookup: new_toc.append(e := lookup.pop(n)); dep = e.get('depth', 0)
+            if not hf.exists(): continue
             if n not in self._fcache: self._fcache[n] = hf.read_text('utf-8', 'ignore')
             if rules.search(c := self._fcache[n]):
                 for i, m in enumerate(rules.finditer(c), 1):
@@ -803,12 +805,13 @@ class EpubProcessor:
                     lvl = next((r[2] for r in s_rules if re.search(f"(?:{r[0]})", matched)), 2)
                     new_toc.append({'title': self._clean_title(matched) or f"Sec {i}", 
                                     'href': f"{hf.stem}_spt_{i:03d}.xhtml", 'depth': dep + lvl - 1})
-        return new_toc
+        return [dict(v, title=strike(v['title'])) for v in lookup.values()] + new_toc
 
     def _apply_regex_split(self, temp_dir, current_toc=None):
         """正则匹配子章节追加分割逻辑"""
         if not (rules := getattr(self, '_split_rules', [])): return current_toc
-        opf_p, last_href, total = self._get_opf_path(Path(temp_dir)), None, 0
+        opf_p, total = self._get_opf_path(Path(temp_dir)), 0
+        last_href = current_toc[0]['href'] if current_toc else None
         regex = re.compile("|".join(f"(?:{r[0]})" for r in rules if r))
         lookup = {Path(t['href'].split('#')[0]).name: t for t in (current_toc or [])}
         TPL = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n'
@@ -817,13 +820,13 @@ class EpubProcessor:
                '<body>\n{c}\n</body>\n</html>')
         for hf in self._get_spine_ordered_files(opf_p):
             if (n := hf.name) in lookup:
-                last_href = lookup[n]['href']; logger.debug(f"更新父级锚点: {n} -> {last_href}")
+                last_href = lookup[n]['href']; logger.debug(f"父级起始锚点: {n} -> {last_href}")
             raw = hf.read_text('utf-8', 'ignore')
             if not (ms := list(regex.finditer(raw))) or not last_href: continue
             # 提取元数据：如果原文件有则用原文件的，没有则默认 ja
             title = (re.search(r'<title>(.*?)</title>', raw, re.I) or [0, "Chapter"])[1]
             lang = (re.search(r'xml:lang="(.*?)"', raw, re.I) or [0, "ja"])[1]
-            logger.debug(f"分割文件: {n} | 注入锚点: {last_href}")
+            logger.debug(f"正在分割文件: {n} | 当前锚点: {last_href}")
             hf.write_text(raw[:ms[0].start()].split("</body>")[0] + "\n</body>\n</html>", 'utf-8')
             ivs, subs, cur_h = [m.start() for m in ms] + [len(raw)], [], hf.relative_to(opf_p.parent).as_posix()
             # 依规则原序提取子章节信息 (1=同级/父, 2=子级)
@@ -832,12 +835,14 @@ class EpubProcessor:
                 new_f.write_text(TPL.format(l=lang, t=title, c=raw[ivs[i]:ivs[i+1]].split("</body>")[0].strip()), 'utf-8')
                 # 直接从 rules 匹配层级 (r[0]=pattern, r[2]=level)，匹配不到则默认为 2
                 matched = m.group()
-                subs.append({
+                s = {
                     'id': new_f.stem.replace('.', '_'), 
                     'href': new_f.relative_to(opf_p.parent).as_posix(), 
                     'title': self._clean_title(matched), 
                     'depth': next((r[2] for r in rules if re.search(f"(?:{r[0]})", matched)), 2)
-                })
+                }
+                subs.append(s)
+                logger.debug(f"匹配条目: 标题={s['title']}, 层级={s['depth']}, 文件={new_f.name}")
             # OPF 原位插入(Manifest 紧跟原文件，Spine 保持顺序)
             soup = BeautifulSoup(opf_p.read_text('utf-8'), 'xml')
             if (old_it := soup.find('item', href=cur_h)) and (old_rf := soup.find('itemref', idref=old_it['id'])):
@@ -847,7 +852,15 @@ class EpubProcessor:
                         old_it = ni
                 [old_rf.insert_after(soup.new_tag('itemref', idref=s['id'])) for s in reversed(subs)]
                 opf_p.write_text(str(soup), 'utf-8')
-            try: total += (EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, subs) or 0)
+            try:
+                if (added := EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, subs)):
+                    total += (target := subs[-1]) and added
+                    # 锚点更新逻辑：同级 则锚点切换到最后一个新增章节；子级 锚点维持不变
+                    if target.get('depth', 2) == 1:
+                        old_h, last_href = last_href, target['href']
+                        logger.debug(f"锚点变更(同级): 从 {old_h} 切换至 {last_href}, 共新增 {added} 个同级章节")
+                    else:
+                        logger.debug(f"锚点维持(子级): 依然使用 {last_href}, 包含 {len(subs)} 个子项")
             except Exception as e: logger.error(f"插入章节失败: {e}")
         if total > 0: logger.info(f"追加/分割章节完成: 共 {total} 条子章节")
         return current_toc
