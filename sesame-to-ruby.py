@@ -46,7 +46,7 @@ class EpubProcessor:
             ('批量转换', self.batch_convert_epubs, (0, 2), "批量转换\n支持epub拖拽到按钮\n原名文件保存至output文件夹"),
             ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
             ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目\n批量也能排除指定的章节名\n右键管理排除列表"),
-            ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态"),
+            ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态\n右键重置内存winsize值"),
         ]
         for text, cmd, (row, col), tip in btn_cfgs:
             btn = tk.Button(main_frame, text=text, command=cmd, font=FONT)
@@ -56,6 +56,8 @@ class EpubProcessor:
                 btn.drop_target_register(DND_FILES)
                 btn.dnd_bind('<<Drop>>', lambda e, self=self: self.root.after(100, lambda: self.batch_convert_epubs(
                     [f for f in self.root.tk.splitlist(e.data) if f.lower().endswith('.epub')])))
+            elif text == '重置设置':
+                btn.bind('<Button-3>', lambda e: self.win_size.clear())
             elif text == '排除合并':
                 btn.bind('<Button-3>', lambda e: self.show_exclude_list_dialog() if e.num == 3 else None)
 
@@ -114,11 +116,14 @@ class EpubProcessor:
                 w = cls(row, **cfg); ToolTip(w, text=etp)
                 w.pack(side=tk.LEFT, fill=(tk.X if kw.get('sticky')=='ew' else None), expand=(kw.get('sticky')=='ew'), padx=kw.get('px', 0))
 
-        # 配置路径
+        # 配置路径与读写
         base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
         self.config_file = base_dir / "config.ini"
+        self.win_size = WinSize(self.config_file)
         self.log_level_var = self._settings_vars_dict.setdefault('log_level', tk.StringVar(value="info"))
         self.load_app_settings()
+        recorder = self.win_size.setup(root, "main", "350x620+600+160")
+        root.bind('<Configure>', recorder, add='+')
 
         self.regex_manager = RegexManager(root, self.config_file, self.log_level_var, self)
         self._save_config()
@@ -724,7 +729,7 @@ class EpubProcessor:
 
         # 2. UI 构建
         dialog = tk.Toplevel(self.root); dialog.title("选择不合并条目 / 正则追加分割章节")
-        dialog.geometry(f"605x600+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"); dialog.focus_force()
+        self.win_size.setup(dialog, "show_exclude_dialog", f"605x600+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"); dialog.focus_force()
         main_frame = ttk.Frame(dialog); main_frame.pack(fill="both", expand=True, padx=5, pady=5)
         tree = ttk.Treeview(main_frame, columns=("t", "h"), show="headings", selectmode="extended")
         sb = ttk.Scrollbar(main_frame, command=tree.yview); tree.configure(yscrollcommand=sb.set); sb.pack(side="right", fill="y")
@@ -882,7 +887,7 @@ class EpubProcessor:
             self._exclude_initialized = True
 
         d = tk.Toplevel(self.root); d.title("已排除的合并章节列表")
-        d.geometry(f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"); d.focus_force()
+        self.win_size.setup(d, "show_exclude_list", f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"); d.focus_force()
         f_tree = ttk.Frame(d); f_tree.pack(fill="both", expand=True, padx=5, pady=5)
         tree = ttk.Treeview(f_tree, columns=("t", "h"), show="headings", selectmode="extended")
         sb = ttk.Scrollbar(f_tree, orient="vertical", command=tree.yview); tree.configure(yscrollcommand=sb.set)
@@ -915,12 +920,14 @@ class EpubProcessor:
         ClassList(self.root, self.epub_path, 
                   lambda: self.temp_style_content, 
                   lambda v: setattr(self, 'temp_style_content', v), 
-                  lambda v: setattr(self, 'temp_style_content', self.temp_style_content + v))
+                  lambda v: setattr(self, 'temp_style_content', self.temp_style_content + v),
+                  self.win_size)
 
     def save_app_settings(self, return_config=False):
         """保存到配置文件，或返回ConfigParser对象"""
         config = configparser.ConfigParser()
         config['AppSettings'] = {k: str(v.get()) for k, v in self._settings_vars_dict.items()}
+        if self.win_size._states: self.win_size.save(config)
         if entries := getattr(self, 'excluded_toc_entries', []):
             config['ExcludeTocEntries'] = {str(i): f"{t}|{h}" for i, (t, h) in enumerate(entries)}
         if return_config: return config
@@ -964,10 +971,47 @@ class EpubProcessor:
         # 同步重置正则规则
         if hasattr(self, 'regex_manager'): self.regex_manager.reset_to_default()
 
+class WinSize:
+    def __init__(self, config_file=None):
+        self._states = {}
+        if config_file and config_file.exists():
+            try:
+                c = config_file.read_text('utf-8').split('[WinSize]', 1)[1].split('[', 1)[0]
+                self._states = {k.strip(): v.strip() for l in c.splitlines() if '=' in l for k, v in [l.split('=', 1)]}
+            except Exception: pass
+
+    def clear(self):
+        self._states = {}
+        logger.info("已清空内存WinSize数值")
+
+    def setup(self, window, key, default_geom, mode=None):
+        """应用位置并返回专属防抖记录器。内部自动处理坐标纠偏与边界保底。"""
+        geom = self._states.get(key) or default_geom
+        if (m := __import__('re').match(r"(\d+)x(\d+)([-+]-?\d+)([-+]-?\d+)", geom)):
+            w, h, x, y = [int(s.replace('+-', '-').replace('-+', '-').replace('--', '+')) for s in m.groups()]
+            sw, sh = window.winfo_screenwidth(), window.winfo_screenheight()
+            # 级联逻辑
+            if mode == 'cascade':
+                ex = {(t.winfo_x(), t.winfo_y()) for t in window.master.winfo_children() if isinstance(t, tk.Toplevel) and t != window}
+                while any(abs(x - ex_x) < 10 and abs(y - ex_y) < 10 for ex_x, ex_y in ex): x, y = x + 30, y + 30
+            # 3. 边界保底：强制回正，防止记录负值
+            x, y = max(0, min(x, sw - w)), max(0, min(y, sh - h))
+            try: window.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception: pass
+
+        def recorder(e=None):
+            # 闭包记录器 自带过滤和防抖
+            if e and e.widget != window: return
+            if hasattr(window, '_ds'): window.after_cancel(window._ds)
+            window._ds = window.after(500, lambda: self._states.update({key: window.winfo_geometry()}) if window.winfo_exists() else None)
+        return recorder
+
+    def save(self, config):
+        config['WinSize'] = self._states
+
 if __name__ == "__main__":
     logger.info("程序初始化")
     root = TkinterDnD.Tk()
-    root.geometry("350x620+600+160")  # 设置初始窗口大小
 
     processor = EpubProcessor(root)
     logger.info("进入主循环")

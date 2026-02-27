@@ -9,9 +9,10 @@ from tkinter import ttk, messagebox
 import lxml.html
 
 class ClassList:
-    def __init__(self, root, epub_path, get_temp, set_temp, append_temp):
+    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, win_size=None):
         self.root, self.epub_path = root, epub_path
         self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
+        self.win_size = win_size
         self.style_data, self.samples_data, self.counts_data = {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
         self.all_items_refs, self.n_map, self.st = [], {"": ""}, {"#0": False, "count": False}
@@ -20,7 +21,7 @@ class ClassList:
     def show_class_list(self):
         cw = tk.Toplevel(self.root)
         cw.title("html内样式收集分析")
-        cw.geometry(f"600x480+{self.root.winfo_x()+-30}+{self.root.winfo_y()+30}")
+        self.win_size.setup(cw, "class_list_main", f"600x480+{self.root.winfo_x()+-30}+{self.root.winfo_y()+30}")
 
         pw = ttk.PanedWindow(cw, orient="horizontal")
         pw.pack(fill="both", expand=True)
@@ -58,7 +59,7 @@ class ClassList:
         vsb = ttk.Scrollbar(tf, command=tree.yview); vsb.grid(row=0, column=1, sticky="ns")
         tree.config(yscrollcommand=vsb.set); tf.columnconfigure(0, weight=1); tf.rowconfigure(0, weight=1)
 
-        ttk.Style().configure("Treeview", indent=10) #调整Treeview缩进余白
+        ttk.Style().configure("Treeview", indent=8) #调整Treeview缩进余白
         # 默认展开控制
         nodes = {k: tree.insert("", "end", text=k, open=(k in ['Class列表', 'Span列表', '图片Class列表'])) for k in self.cats}
         class_to_iid = {}
@@ -175,7 +176,10 @@ class ClassList:
         # 显示样式详情+实例
         def show_details(event=None):
             if not (item := (tree.identify_row(event.y) if event else (tree.selection() or [None])[0])) or item in nodes.values(): return
-            win = tk.Toplevel(cw); win.geometry(f"500x480+{self.root.winfo_x()+140}+{self.root.winfo_y()+80}"); win.focus_force()
+            win = tk.Toplevel(cw)
+            rec = self.win_size.setup(win, "class_list_details", f"500x480+{self.root.winfo_x()+140}+{self.root.winfo_y()+80}", mode='cascade')
+            win.bind('<Configure>', rec, add='+')
+            win.protocol("WM_DELETE_WINDOW", win.destroy); win.focus_force()
             # 获取下一个节点的 lambda，用于左右键切换
             get_nxt = lambda r: (b := tree.get_children(tree.parent(tree.selection()[0])))[(b.index(tree.selection()[0]) + (-1 if r else 1)) % len(b)]
 
