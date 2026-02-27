@@ -3,10 +3,15 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import zipfile
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 import lxml.html
+from bs4 import BeautifulSoup
+from loguru import logger
+from tkinterdnd2 import DND_FILES
 
 class ClassList:
     def __init__(self, root, epub_path, get_temp, set_temp, append_temp, win_size=None):
@@ -16,130 +21,274 @@ class ClassList:
         self.style_data, self.samples_data, self.counts_data = {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
         self.all_items_refs, self.n_map, self.st = [], {"": ""}, {"#0": False, "count": False}
+        self.preview_window = self.details_window = None
+        self._after_ids = []
+        self._running = True
+        self.modified_files = {}
+        self._dragging = False # 拖入拖出 互斥锁
+        self.sesame_root = Path(tempfile.gettempdir(), "sesame_cache"); self.sesame_root.mkdir(parents=True, exist_ok=True)
         self.show_class_list()
 
     def show_class_list(self):
         cw = tk.Toplevel(self.root)
         cw.title("html内样式收集分析")
+        cw.protocol("WM_DELETE_WINDOW", lambda c=cw: (setattr(self, '_running', False), 
+                                                      [c.after_cancel(aid) for aid in self._after_ids], 
+                                                      [(w.unbind('<Destroy>'), w.destroy()) for w in c.winfo_children()], 
+                                                      [clean_old_epub_cache()],  # 关闭时清理旧缓存
+                                                      c.destroy()))
         self.win_size.setup(cw, "class_list_main", f"600x480+{self.root.winfo_x()+-30}+{self.root.winfo_y()+30}")
+        pw = ttk.PanedWindow(cw, orient="horizontal"); pw.pack(fill="both", expand=True)
 
-        pw = ttk.PanedWindow(cw, orient="horizontal")
-        pw.pack(fill="both", expand=True)
-        
         # 左侧文件树
         lf, rf = ttk.Frame(pw, width=150), ttk.Frame(pw, width=330)
         [pw.add(f, weight=w) for f, w in [(lf, 1), (rf, 0)]]
-        ftree = ttk.Treeview(lf, show="tree", selectmode="browse")
+        
+        # 顶部工具栏
+        lf_top = ttk.Frame(lf); lf_top.pack(fill="x", padx=3, pady=4)
+        ttk.Label(lf_top, text="文件列表").pack(side="left")
+        
+        def save_changes():
+            if not self.modified_files: return messagebox.showinfo("保存", "没有检测到任何更改。", parent=cw)
+            try:
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".epub"); os.close(tmp_fd)
+                with zipfile.ZipFile(self.epub_path, "r") as z_in, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as z_out:
+                    [z_out.writestr(item, z_in.read(item.filename)) for item in z_in.infolist() if item.filename not in self.modified_files]
+                    [z_out.writestr(path, content) for path, content in self.modified_files.items() if content]
+                shutil.move(tmp_path, self.epub_path); self.modified_files.clear()
+                messagebox.showinfo("保存", "修改已成功保存至EPUB。", parent=cw)
+            except Exception as e: messagebox.showerror("保存失败", str(e), parent=cw)
+        
+        ttk.Button(lf_top, text="保存", width=5, command=save_changes).pack(side="right")
+        lf_tree_frame = ttk.Frame(lf); lf_tree_frame.pack(fill="both", expand=True, padx=(3, 0), pady=2)
+        ftree = ttk.Treeview(lf_tree_frame, show="tree", selectmode="extended")
         ftree.pack(side="left", fill="both", expand=True)
-        f_vsb = ttk.Scrollbar(lf, command=ftree.yview); f_vsb.pack(side="right", fill="y")
+        f_vsb = ttk.Scrollbar(lf_tree_frame, command=ftree.yview); f_vsb.pack(side="right", fill="y")
         ftree.config(yscrollcommand=f_vsb.set)
+        
+        # 文件树右键菜单 选中项删除确认及内存标记
+        ftree_menu = tk.Menu(ftree, tearoff=0)
+        ftree_menu.add_command(label="删除文件", command=lambda: (sel := ftree.selection()) and 
+                                    messagebox.askyesno("确认", f"确认删除选中的 {len(sel)} 个项目?", parent=cw) and 
+                                    [ (self.modified_files.__setitem__(ftree.item(i, "tags")[0], None), ftree.delete(i)) for i in sel ])
+        ftree.bind("<Button-3>", lambda e: (iid := ftree.identify_row(e.y)) and (ftree.selection_add(iid), ftree_menu.post(e.x_root, e.y_root)))
+
+        if DND_FILES:
+            # 拖入处理函数：识别目标目录、集成覆盖确认与动态统计
+            def drop_handler(event):
+                if self._dragging: return "break"
+                try:
+                    raw = re.findall(r"\{(.*?)\}|\S+", event.data) if "{" in event.data else event.data.split()
+                    paths = [p for f in raw if (p := Path(f.strip('{} "'))) and p.is_file()]
+                    if not paths: return messagebox.showwarning("提示", f"数据无效: {event.data[:50]}", parent=cw)
+                    rid = ftree.identify_row(event.y_root - ftree.winfo_rooty())
+                    tag = ftree.item(rid, "tags")[0] if rid else ""
+                    tdir = (Path(tag).as_posix() + "/" if tag.endswith('/') else Path(tag).parent.as_posix() + "/").lstrip("./")
+                    piid, (a, c, s) = self.n_map.get(tdir.rstrip("/"), ""), [0, 0, 0]
+                    exs = {ftree.item(i, "tags")[0]: i for i in ftree.get_children(piid)}
+                    for src in paths:
+                        dst = f"{tdir}{src.name}"
+                        if (ex := dst in exs) and not messagebox.askyesno("覆盖", f"替换 {dst}?", parent=cw):
+                            s += 1; continue
+                        self.modified_files[dst] = src.read_bytes() # 写入内存暂存
+                        (ftree.insert(piid, "end", text=dst, tags=(dst,)), [a := a + 1]) if not ex else [c := c + 1]
+                    res = [f"- {k}: {v}个" for k, v in zip(["新增", "覆盖", "跳过"], [a, c, s]) if v]
+                    messagebox.showinfo("导入结果", "完成：\n" + "\n".join(res), parent=cw)
+                except Exception as e: messagebox.showerror("错误", str(e), parent=cw)
+            # 拖出处理函数 (强制恢复视觉状态：利用锁定集合覆盖系统当前的单选状态)
+            def drag_out_handler(event):
+                if self._dragging: return "break"
+                self._dragging = True # 上锁
+                sel = getattr(drag_out_handler, 'locked_sel', ftree.selection())
+                if not sel: return "break"
+                ftree.selection_set(sel) 
+                ftree.update_idletasks() # 强制 UI 立即重绘高亮，防止视觉闪烁
+                try: # 指纹目录：epub_out_{路径Hash}_{修改时间} 按需创建 atexit回收
+                    st = Path(self.epub_path).stat()
+                    h_p = abs(hash(str(Path(self.epub_path).resolve())))
+                    ts = time.strftime("%y%m%d_%H%M%S", time.localtime(st.st_mtime))
+                    out = self.sesame_root / f"epub_out_{h_p}_{ts}"
+                    out.exists() or [out.mkdir(parents=True), atexit.register(lambda: shutil.rmtree(out, ignore_errors=True))]
+                    files = [f'{{{t.resolve().as_posix()}}}' for i in sel if not (p := ftree.item(i, "tags")[0]).endswith('/')
+                             and (t := out / Path(p).name).write_bytes(self.modified_files.get(p) or 
+                             zipfile.ZipFile(self.epub_path).read(p))]
+                    return ('copy', DND_FILES, " ".join(files)) if files else "break"
+                except Exception as ex: messagebox.showerror("导出错误", str(ex), parent=cw); return "break"
+                finally: # 延迟解锁，给 UI 响应留出缓冲时间
+                    cw.after(500, lambda: setattr(self, '_dragging', False))
+            # 绑定：锁定多选逻辑
+            ftree.bind("<<TreeviewSelect>>", lambda e: setattr(drag_out_handler, 'last_sel', ftree.selection()))
+            # Button-1 按下时，如果点击项在已选集中，则立即锁定整个集合防止 DND 启动时重置
+            def lock_sel(e):
+                rid, l_sel = ftree.identify_row(e.y), getattr(drag_out_handler, 'last_sel', ())
+                setattr(drag_out_handler, 'locked_sel', l_sel if rid in l_sel else (rid,))
+            ftree.bind("<Button-1>", lock_sel, add="+")
+
+            # 注册拖放事件
+            ftree.drop_target_register(DND_FILES); ftree.dnd_bind("<<Drop>>", drop_handler)
+            ftree.drag_source_register(1, DND_FILES); ftree.dnd_bind("<<DragInitCmd>>", drag_out_handler)
+
         # 右侧class列表
-        filter_frame = ttk.Frame(rf); filter_frame.pack(fill="x", padx=3, pady=2)
+        filter_frame = ttk.Frame(rf); filter_frame.pack(fill="x", padx=(0, 3), pady=2)
         filter_var = tk.StringVar()
         ttk.Entry(filter_frame, textvariable=filter_var).pack(side="left", fill="x", expand=True)
-        tf = ttk.Frame(rf); tf.pack(fill="both", expand=True, padx=3, pady=2)
+        tf = ttk.Frame(rf); tf.pack(fill="both", expand=True, padx=(0, 3), pady=2)
         tree = ttk.Treeview(tf, columns=("count",), show="tree headings", selectmode="extended")
 
         # 排序逻辑函数
         self.lc = None
         def sort_col(col):
-            self.st[col] = (col == "#0") if col != self.lc else not self.st[col]
-            self.lc = col
+            self.st[col], self.lc = ((col == "#0") if col != self.lc else not self.st[col]), col
             for n in nodes.values():
-                items = sorted([(tree.set(c, "count"), tree.item(c, "text"), c) for c in tree.get_children(n)], 
-                               key=lambda x: int(x[0]) if col=="count" else x[1].lower(), reverse=not self.st[col])
+                items = sorted([(tree.set(c, "count"), tree.item(c, "text"), c) for c in tree.get_children(n)], key=lambda x: int(x[0]) if col=="count" else x[1].lower(), reverse=not self.st[col])
                 [tree.move(it[2], n, i) for i, it in enumerate(items)]
             [tree.heading(c, text=f"{'类名' if c=='#0' else '总量'}{(' ▲' if self.st[c] else ' ▼') if c==col else ''}") for c in ["#0", "count"]]
 
         # 初始表头设置
-        tree.heading("#0", text="类名", anchor="w", command=lambda: sort_col("#0"))
-        tree.heading("count", text="总量", anchor="center", command=lambda: sort_col("count"))
-        tree.column("#0", width=200); tree.column("count", width=50, anchor="center")
-        tree.grid(row=0, column=0, sticky="nsew")
-        vsb = ttk.Scrollbar(tf, command=tree.yview); vsb.grid(row=0, column=1, sticky="ns")
+        [tree.heading(c, text=t, anchor=a, command=lambda _c=c: sort_col(_c)) for c, t, a in [("#0", "类名", "w"), ("count", "总量", "center")]]
+        [tree.column(c, width=w, anchor=a) for c, w, a in [("#0", 200, "w"), ("count", 50, "center")]]
+        tree.grid(row=0, column=0, sticky="nsew"); vsb = ttk.Scrollbar(tf, command=tree.yview); vsb.grid(row=0, column=1, sticky="ns")
         tree.config(yscrollcommand=vsb.set); tf.columnconfigure(0, weight=1); tf.rowconfigure(0, weight=1)
 
         ttk.Style().configure("Treeview", indent=8) #调整Treeview缩进余白
         # 默认展开控制
         nodes = {k: tree.insert("", "end", text=k, open=(k in ['Class列表', 'Span列表', '图片Class列表'])) for k in self.cats}
         class_to_iid = {}
+        filter_var.trace_add("write", lambda *args: do_filter()) # 绑定筛选输入变化事件
 
         # 预览逻辑+搜索框
         def preview_file(e):
-            if not (sel := ftree.selection()) or not (p := ftree.item(sel[0], "tags")[0]) or p.endswith('/'): return
+            if not (sel := ftree.selection()) or not ftree.exists(sel[0]) or not (p := ftree.item(sel[0], "tags")[0]) or p.endswith('/'): return
             try:
+                mtime = os.path.getmtime(self.epub_path)
                 # 图片读取逻辑:解压至临时文件并调用默认图片查看器
                 exts = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
                 if p.lower().endswith(exts):
-                    # 建立基于EPUB路径指纹的唯一临时目录
-                    td = os.path.join(tempfile.gettempdir(), f"epub_img_{hash(self.epub_path)}")
-                    if not os.path.exists(td):
-                        os.makedirs(td)
-                        # 注册清理逻辑，d=td 利用默认参数捕获当前路径
+                    ts = time.strftime("%y%m%d_%H%M%S", time.localtime(mtime))
+                    is_mod = p in self.modified_files and self.modified_files[p]
+                    prefix = "mod" if is_mod else "img"
+                    td = self.sesame_root / f"epub_{prefix}_{abs(hash(self.epub_path))}_{ts}"
+                    # 目录创建与回收逻辑：若不存在则创建并atexit注册删除
+                    if not td.exists():
+                        td.mkdir(parents=True, exist_ok=True)
                         atexit.register(lambda d=td: shutil.rmtree(d, ignore_errors=True))
+                    target = td / Path(p).name
+                    if is_mod:
+                        target.write_bytes(self.modified_files[p])
+                    elif not target.exists():
                         # 一次性全量解压(这里可能需要性能优化 改成异步处理或者按需解压)
                         with zipfile.ZipFile(self.epub_path, 'r') as z:
-                            [open(os.path.join(td, os.path.basename(x)), 'wb').write(z.read(x)) for x in z.namelist() if x.lower().endswith(exts)]
-                    target = os.path.join(td, os.path.basename(p))
+                            [(td / Path(x).name).write_bytes(z.read(x)) for x in z.namelist() if x.lower().endswith(exts)]
                     return os.startfile(target) if hasattr(os, 'startfile') else __import__('subprocess').run(['open', target])
-                #  内存读取预览文本逻辑 显示内容+正则搜索
-                win = tk.Toplevel(cw); win.geometry(f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}"); win.focus_force()
-                
-                #定义跳过图片的获取逻辑 (用于左右键切换)
+                # 内存读取预览文本逻辑 显示内容+正则搜索
+                key = "class_list_preview"
+                rec = self.win_size.setup(win := tk.Toplevel(cw), key, f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}", mode='cascade')
+                win.bind('<Configure>', rec, add='+')
+                win.protocol("WM_DELETE_WINDOW", win.destroy); win.focus_force()
+                state = {"current_file": p, "search_results": [], "search_index": -1, "last_q": None} # 状态存储 (用于搜索)
+
+                # 定义跳过图片的获取逻辑 (用于左右键切换)
                 def get_next_text(rev):
-                    bro = ftree.get_children(ftree.parent(ftree.selection()[0]))
-                    idx = bro.index(ftree.selection()[0])
-                    valid = [b for b in bro if not (p := ftree.item(b, "tags")[0].lower()).endswith(exts) and not p.endswith('/')]
-                    if not valid: return ftree.selection()[0]
                     curr_sel = ftree.selection()[0]
+                    bro = [b for b in ftree.get_children(ftree.parent(curr_sel)) if ftree.exists(b)]
+                    valid = [b for b in bro if not (p := ftree.item(b, "tags")[0].lower()).endswith(exts) and not p.endswith('/')]
+                    if not valid: return curr_sel
                     if curr_sel in valid:
                         return valid[(valid.index(curr_sel) + (-1 if rev else 1)) % len(valid)]
-                    return valid[(idx + (-1 if rev else 0)) % len(valid)]
+                    return valid[0]
 
                 sf = ttk.Frame(win); sf.pack(fill="x", padx=2, pady=2)
                 se = ttk.Entry(sf); se.pack(side="left", fill="x", expand=1)
+                
+                # 全局搜索复选框
+                global_search_var = tk.BooleanVar(value=False)
+                ttk.Checkbutton(sf, text="全局匹配", variable=global_search_var, command=lambda: do_find(reset=True)).pack(side="left", padx=5)
                 sl = ttk.Label(sf, text="0/0"); sl.pack(side="right", padx=5)
-                [ttk.Button(sf, text=t, width=3, command=lambda r=v: do_find(r)).pack(side="right") for t, v in [("↓", 0), ("↑", 1)]]
+                [ttk.Button(sf, text=t, width=3, command=lambda r=v: do_find(rev=r)).pack(side="right") for t, v in [("↓", 0), ("↑", 1)]]
                 txt = tk.Text(win, font=('Consolas', 10), wrap="word")
                 sv = ttk.Scrollbar(win, command=txt.yview); txt.config(yscrollcommand=sv.set)
                 [f.pack(side=s, fill=y, expand=e) for f,s,y,e in [(sv,"right","y",0), (txt,"left","both",1)]]
                 [txt.tag_config(k, background=v) for k,v in [("m", "yellow"), ("cur", "orange")]]
-                def do_find(rev=False):
+
+                # 加载文件内容到文本预览框并同步文件树选中状态
+                def load_content_to_text(fpath):
+                    state["current_file"] = fpath; win.title(fpath)
+                    content = (self.modified_files[fpath].decode('utf-8', 'ignore') if fpath in self.modified_files and self.modified_files[fpath] is not None else
+                            zipfile.ZipFile(self.epub_path, 'r').read(fpath).decode('utf-8', 'ignore') if fpath in zipfile.ZipFile(self.epub_path, 'r').namelist() else "")
+                    txt.config(state="normal"); txt.delete("1.0", "end"); txt.insert("1.0", content); txt.config(state="disabled")
+                    [(ftree.selection_set(n), ftree.see(n)) for n in self.n_map.values() if n and ftree.exists(n) and ftree.item(n, "tags")[0] == fpath]
+
+                # 执行正则搜索定位，支持全局匹配与高亮
+                def do_find(rev=False, reset=False):
                     [txt.tag_remove(t, "1.0", "end") for t in ("m", "cur")]
                     if not (q := se.get()): return sl.config(text="0/0")
-                    res, s, n = [], "1.0", tk.IntVar()
-                    while (s := txt.search(q, s, "end", regexp=1, count=n)):
-                        res.append((s, n.get())); s = f"{s}+{res[-1][1]}c"
-                    if not res: return sl.config(text="0/0")
-                    l_q = getattr(do_find, 'lq', "")
-                    do_find.i = (getattr(do_find, 'i', -1) + (-1 if rev else 1)) % len(res) if q == l_q else (0 if not rev else -1)
-                    do_find.lq, (p_c, p_l) = q, res[do_find.i]
-                    [txt.tag_add("m", r, f"{r}+{rl}c") for r, rl in res]
-                    txt.tag_add("cur", p_c, f"{p_c}+{p_l}c")
-                    txt.see(p_c); sl.config(text=f"{do_find.i+1}/{len(res)}")
+                    if q != state["last_q"] or reset: # 仅在查询变动或重置时重新扫描
+                        state.update({"last_q": q, "search_results": [], "search_index": -1})
+                        try:
+                            with zipfile.ZipFile(self.epub_path, "r") as z:
+                                nl = z.namelist()
+                                s_files = sorted({f for f in (nl if global_search_var.get() else [state["current_file"]]) + list(self.modified_files.keys()) 
+                                                if f.endswith((".html", ".xhtml")) and (f in nl or self.modified_files.get(f) is not None)})
+                                [state["search_results"].extend([{"path": f, "span": m.span()} for m in re.finditer(q, (self.modified_files[f] if f in self.modified_files 
+                                and self.modified_files[f] is not None else z.read(f)).decode("utf-8", "ignore"))]) for f in s_files]
+                            if res := state["search_results"]: state["search_index"] = next((i for i, r in enumerate(res) if r["path"] == state["current_file"]), 0)
+                        except Exception: return sl.config(text="Err")
+                    if not state["search_results"]: return sl.config(text="0/0")
+                    state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(state["search_results"]) if not reset else state["search_index"]
+                    target = state["search_results"][state["search_index"]]
+                    if target["path"] != state["current_file"]: load_content_to_text(target["path"])
+                    # 批量高亮所有匹配项
+                    s_idx, cv = "1.0", tk.IntVar()
+                    while (s_idx := txt.search(q, s_idx, "end", count=cv, regexp=True)): 
+                        txt.tag_add("m", s_idx, (e_idx := f"{s_idx}+{cv.get()}c")); s_idx = e_idx
+                    # 高亮并跳转到当前特定匹配项
+                    m_idx, s_idx = sum(1 for i in range(state["search_index"]) if state["search_results"][i]["path"] == target["path"]), "1.0"
+                    for _ in range(m_idx + 1): 
+                        if not (s_idx := txt.search(q, s_idx, "end", count=cv, regexp=True)): break
+                        if _ == m_idx: (txt.tag_add("cur", s_idx, (nxt := f"{s_idx}+{cv.get()}c")), txt.see(s_idx))
+                        s_idx = f"{s_idx}+{cv.get()}c"
+                    sl.config(text=f"{state['search_index'] + 1}/{len(state['search_results'])}")
 
-                def load_content():
-                    cp = ftree.item(ftree.selection()[0], "tags")[0]; win.title(cp)
-                    with zipfile.ZipFile(self.epub_path, 'r') as z: content = z.read(cp).decode('utf-8', 'ignore')
-                    txt.config(state="normal"); txt.delete("1.0", "end"); txt.insert("1.0", content); txt.config(state="disabled")
-                    do_find()
-
-                # 键盘绑定：回车/下键=向下，Shift+回车/上键=向上 左右键绑定 使用 get_next_text 自动过滤图片
-                [win.bind(k, lambda e, r=v: [ftree.selection_set(get_next_text(r)), ftree.see(ftree.selection()[0]), load_content()]) for k, v in [("<Left>", 1), ("<Right>", 0)]]
-                (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(500, lambda: do_find(0)))))
-                se.focus_set(); load_content()
+                # 批量绑定快捷键：左右键切换文件，上下键切换搜索结果，输入框自动防抖搜索
+                [win.bind(k, lambda e, r=v: [ftree.selection_set(nxt := get_next_text(r)), ftree.see(nxt), load_content_to_text(ftree.item(nxt, "tags")[0]), do_find(reset=True)]) for k, v in [("<Left>", 1), ("<Right>", 0)]]
+                [win.bind(k, lambda e, r=v: do_find(rev=r)) for k, v in [("<Up>", 1), ("<Down>", 0)]]
+                (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(500, lambda: do_find(reset=True)))))
+                se.focus_set(); load_content_to_text(p)
             except Exception as ex: messagebox.showerror("错误", str(ex), parent=cw)
         ftree.bind("<Double-1>", preview_file)
 
+        # Bs4获取OPF Spine顺序 解析XML并构建映射
+        def get_opf_spine_order(z):
+            try:
+                bs = BeautifulSoup(z.read("META-INF/container.xml").decode("utf-8"), "xml")
+                opf_full_path = (bs.find("rootfile") or {}).get("full-path", "")
+                if not opf_full_path: return {}
+                opf_dir = (lambda d: f"{d.replace(chr(92), '/')}/" if d else "")(os.path.dirname(opf_full_path))
+                opf_soup = BeautifulSoup(z.read(opf_full_path).decode("utf-8"), "xml")
+                manifest = {it.get("id"): it.get("href", "") for it in opf_soup.find_all("item") if it.get("id")}
+                return {f"{opf_dir}{manifest[idref]}": idx 
+                        for idx, itemref in enumerate(opf_soup.find_all("itemref")) 
+                        if (idref := itemref.get("idref")) and idref in manifest}
+            except: return {}
+
+        # 构建epub文件树 提取样式和实例数据
         def parse_gen():
             with zipfile.ZipFile(self.epub_path, 'r') as z:
-                nl = sorted(z.namelist())
+                spine= get_opf_spine_order(z)
+                def sort_key(p):
+                    low = p.lower()
+                    # 语义权重：HTML(0) > CSS(1) > ncx/opf/xml(2) > 其他(3)
+                    w = 0 if low.endswith(('.html', '.xhtml')) else 1 if low.endswith('.css') else 2 if low.endswith(('.ncx', '.opf', '.xml')) else 3
+                    return (not p.endswith('/'), w, (0, spine.get(p, 0)) if w == 0 else (1, low))
+                nl = sorted(z.namelist(), key=sort_key)
                 [ (parts := p.split('/'), [ (cur := "/".join(parts[:i+1]), pre := "/".join(parts[:i]), 
-                   cur not in self.n_map and self.n_map.update({cur: ftree.insert(self.n_map[pre], "end", text=cur, tags=(cur if (i==len(parts)-1 and not p.endswith('/')) else cur+"/",))}),
-                   (i < len(parts)-1 and any(x.endswith(('.html', '.xhtml')) for x in nl if x.startswith(cur))) and ftree.item(self.n_map[cur], open=True)
-                  ) for i in range(len(parts))]) for p in nl ]
+                   cur not in self.n_map and self.n_map.update({cur: ftree.insert(self.n_map[pre], "end", text=cur, 
+                   tags=(cur if (i==len(parts)-1 and not p.endswith('/')) else cur+"/",))}),
+                   (i < len(parts)-1) and ftree.item(self.n_map[cur], open=True) # 直接赋值True 列表全部展开
+                  ) for i in range(len(parts) - (1 if p.endswith('/') else 0))]) for p in nl ]
                 yield
                 for f in nl:
+                    if not self._running: return
                     # 提取css样式
                     if f.endswith('.css'):
                         b_txt = z.read(f).decode('utf-8', 'ignore')
@@ -162,15 +311,15 @@ class ClassList:
                                     [tree.move(child, nodes[k], idx) for idx, child in enumerate(ch)]))
                                   for k, v in [('Class列表', 1), ('Span列表', tag=='span'), ('图片Class列表', tag=='img'), 
                                                ('非P标签列表', tag!='p'), ('非P、img、body标签列表', tag not in ['p','img','body'])] if v ]
-                                if len(self.samples_data.get(c, [])) < 10: # 提取10个实例
+                                if len(self.samples_data.get(c, [])) < 15: # 提取15个实例
                                     s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
                                     self.samples_data.setdefault(c, []).append((f, re.sub(r'\s+', ' ', s_raw)[:150]))
                         yield
-
         gen = parse_gen()
-        def run_step():
-            try: next(gen); cw.after(1, run_step)
-            except (StopIteration, Exception): pass
+        def run_step(): # 递归调用生成器分步处理
+            if self._running:
+                try: (next(gen), self._after_ids.append(cw.after(1, run_step)))
+                except Exception : logger.exception("class_list run_step 发生异常")
         run_step()
 
         # 显示样式详情+实例
@@ -193,12 +342,12 @@ class ClassList:
                          for p, rs in self.style_data.get(name, {}).items() for r in rs]
                 # 组装实例数据：利用 setdefault 进行分组
                 gps = {}; [gps.setdefault(f, []).append(s) for f, s in self.samples_data.get(name, [])]
-                samples = [f"【文件: {f}】\n" + "\n".join(ss) for f, ss in gps.items()]
+                samples = [f"【文件: {f}】\n" + "\n\n".join(ss) for f, ss in gps.items()]
                 for t, cnt in zip(ts, ["\n\n".join(rules) or f"/* 未找到 {name} */", "\n\n".join(samples)]):
                     t.config(state="normal"); t.delete("1.0", "end"); t.insert("end", cnt); t.config(state="disabled")
             # 绑定键盘和关闭协议
             [win.bind(k, lambda e, r=v: [tree.selection_set(get_nxt(r)), tree.see(tree.selection()[0]), update_view()]) for k, v in [("<Left>", 1), ("<Right>", 0)]]
-            win.protocol("WM_DELETE_WINDOW", lambda: [win.destroy(), tree.focus_set()]); update_view()
+            win.protocol("WM_DELETE_WINDOW", lambda: [win.destroy(), tree.focus_set() if tree.winfo_exists() else None]); update_view()
         tree.bind("<Double-1>", show_details)
 
         def copy_selected():
@@ -288,3 +437,9 @@ class ClassList:
         cw.lift()
         cw.focus_force()
         tree.focus_set()
+
+        # 在窗口关闭时清理旧的缓存目录 用于atexit没触发的情况下
+        def clean_old_epub_cache():
+            limit = time.time() - 86400
+            # 清理sesame_root下修改时间超过24小时的旧目录
+            [shutil.rmtree(p, True) for p in self.sesame_root.iterdir() if p.is_dir() and p.stat().st_mtime < limit]
