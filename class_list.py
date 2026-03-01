@@ -51,13 +51,17 @@ class ClassList:
         def save_changes():
             if not self.modified_files: return messagebox.showinfo("保存", "没有检测到任何更改。", parent=cw)
             try:
+                logger.info(f"保存EPUB，共 {len(self.modified_files)} 个项被修改或删除。")
                 tmp_fd, tmp_path = tempfile.mkstemp(suffix=".epub"); os.close(tmp_fd)
                 with zipfile.ZipFile(self.epub_path, "r") as z_in, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as z_out:
                     [z_out.writestr(item, z_in.read(item.filename)) for item in z_in.infolist() if item.filename not in self.modified_files]
                     [z_out.writestr(path, content) for path, content in self.modified_files.items() if content]
                 shutil.move(tmp_path, self.epub_path); self.modified_files.clear()
+                logger.success("修改已成功保存至epub。")
                 messagebox.showinfo("保存", "修改已成功保存至EPUB。", parent=cw)
-            except Exception as e: messagebox.showerror("保存失败", str(e), parent=cw)
+            except Exception as e: 
+                logger.exception(f"保存epub失败: {e}")
+                messagebox.showerror("保存失败", str(e), parent=cw)
         
         ttk.Button(lf_top, text="保存", width=5, command=save_changes).pack(side="right")
         lf_tree_frame = ttk.Frame(lf); lf_tree_frame.pack(fill="both", expand=True, padx=(3, 0), pady=2)
@@ -93,8 +97,11 @@ class ClassList:
                         self.modified_files[dst] = src.read_bytes() # 写入内存暂存
                         (ftree.insert(piid, "end", text=dst, tags=(dst,)), [a := a + 1]) if not ex else [c := c + 1]
                     res = [f"- {k}: {v}个" for k, v in zip(["新增", "覆盖", "跳过"], [a, c, s]) if v]
+                    logger.info(f"拖入导入完成 | 目标目录: '{tdir}' | 结果: 新增{a} 覆盖{c} 跳过{s}")
                     messagebox.showinfo("导入结果", "完成：\n" + "\n".join(res), parent=cw)
-                except Exception as e: messagebox.showerror("错误", str(e), parent=cw)
+                except Exception as e: 
+                    logger.exception(f"拖入文件处理发生错误: {e}")
+                    messagebox.showerror("错误", str(e), parent=cw)
             # 拖出处理函数 (强制恢复视觉状态：利用锁定集合覆盖系统当前的单选状态)
             def drag_out_handler(event):
                 if self._dragging: return "break"
@@ -112,8 +119,11 @@ class ClassList:
                     files = [f'{{{t.resolve().as_posix()}}}' for i in sel if not (p := ftree.item(i, "tags")[0]).endswith('/')
                              and (t := out / Path(p).name).write_bytes(self.modified_files.get(p) or 
                              zipfile.ZipFile(self.epub_path).read(p))]
+                    if files: logger.info(f"拖出导出了 {len(files)} 个文件到临时目录")
                     return ('copy', DND_FILES, " ".join(files)) if files else "break"
-                except Exception as ex: messagebox.showerror("导出错误", str(ex), parent=cw); return "break"
+                except Exception as ex: 
+                    logger.exception(f"拖出文件发生错误: {ex}")
+                    messagebox.showerror("导出错误", str(ex), parent=cw); return "break"
                 finally: # 延迟解锁，给 UI 响应留出缓冲时间
                     cw.after(500, lambda: setattr(self, '_dragging', False))
             # 绑定：锁定多选逻辑
@@ -232,7 +242,9 @@ class ClassList:
                                 [state["search_results"].extend([{"path": f, "span": m.span()} for m in re.finditer(q, (self.modified_files[f] if f in self.modified_files 
                                 and self.modified_files[f] is not None else z.read(f)).decode("utf-8", "ignore"))]) for f in s_files]
                             if res := state["search_results"]: state["search_index"] = next((i for i, r in enumerate(res) if r["path"] == state["current_file"]), 0)
-                        except Exception: return sl.config(text="Err")
+                        except Exception as e: 
+                            logger.error(f"正则搜索失败: {e}")
+                            return sl.config(text="Err")
                     if not state["search_results"]: return sl.config(text="0/0")
                     state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(state["search_results"]) if not reset else state["search_index"]
                     target = state["search_results"][state["search_index"]]
@@ -254,7 +266,9 @@ class ClassList:
                 [win.bind(k, lambda e, r=v: do_find(rev=r)) for k, v in [("<Up>", 1), ("<Down>", 0)]]
                 (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(500, lambda: do_find(reset=True)))))
                 se.focus_set(); load_content_to_text(p)
-            except Exception as ex: messagebox.showerror("错误", str(ex), parent=cw)
+            except Exception as ex: 
+                logger.exception(f"预览文件时发生错误: {ex}")
+                messagebox.showerror("错误", str(ex), parent=cw)
         ftree.bind("<Double-1>", preview_file)
 
         # Bs4获取OPF Spine顺序 解析XML并构建映射
@@ -319,7 +333,8 @@ class ClassList:
         def run_step(): # 递归调用生成器分步处理
             if self._running:
                 try: (next(gen), self._after_ids.append(cw.after(1, run_step)))
-                except Exception : logger.exception("class_list run_step 发生异常")
+                except StopIteration: pass # 正常结束，静默处理
+                except Exception: logger.exception("class_list run_step 发生异常")
         run_step()
 
         # 显示样式详情+实例
@@ -378,7 +393,9 @@ class ClassList:
                             lines = [line.strip() for line in rule['content'].split('\n') if line.strip()]
                             style_lines.append(f"{rule['selector']} {{\n" + '\n'.join(lines) + "\n}\n")
             info = ("选中的条目没有找到对应的CSS定义", f"已追加 {len(items)} 个条目的详细样式到内存（临时style）")
-            if style_lines: self.append_temp_style_content('\n'.join(style_lines) + "\n")
+            if style_lines: 
+                self.append_temp_style_content('\n'.join(style_lines) + "\n")
+                logger.info(info[1])
             messagebox.showinfo("写入", info[bool(style_lines)], parent=cw)
             tree.focus_set()
 
@@ -421,12 +438,14 @@ class ClassList:
             text.pack(side="left", fill="both", expand=True)
             def on_close():
                 self.set_temp_style_content(text.get("1.0", "end-1c"))
+                logger.info("临时样式编辑已关闭并保存")
                 win.destroy()
                 tree.focus_set()
             win.protocol("WM_DELETE_WINDOW", on_close)
 
         def clear_temp_style():
             self.set_temp_style_content("")
+            logger.info("已清空临时样式")
             messagebox.showinfo("清空", "临时样式已清空", parent=cw)
             tree.focus_set()
         btn_edit = ttk.Button(filter_frame, text="编辑", command=edit_temp_style, width=5)
@@ -442,4 +461,5 @@ class ClassList:
         def clean_old_epub_cache():
             limit = time.time() - 86400
             # 清理sesame_root下修改时间超过24小时的旧目录
-            [shutil.rmtree(p, True) for p in self.sesame_root.iterdir() if p.is_dir() and p.stat().st_mtime < limit]
+            count = sum(1 for p in self.sesame_root.iterdir() if p.is_dir() and p.stat().st_mtime < limit and not shutil.rmtree(p, True))
+            if count > 0: logger.info(f"清理了 {count} 个过期的临时缓存目录")
