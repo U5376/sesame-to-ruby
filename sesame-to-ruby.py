@@ -358,8 +358,9 @@ class EpubProcessor:
             logger.debug(f"合并于: {g[0].relative_to(temp_dir).as_posix()} 已合并: {[x.relative_to(temp_dir).as_posix() for x in g[1:]]}")
             ms=BeautifulSoup(m.read_text('utf-8'),'html.parser')
             for sub in g[1:]:
-                mg=BeautifulSoup(sub.read_text('utf-8'),'html.parser')
-                if not mg.body: continue
+                if not sub.exists(): logger.warning(f"合并目标文件不存在，已跳过: {sub}"); continue
+                mg = BeautifulSoup(sub.read_text('utf-8'), 'html.parser')
+                if not getattr(mg, 'body', None): logger.warning(f"缺失body: {sub}"); continue
                 for t in tags: el=ms.new_tag(t); t=='p' and el.append(ms.new_tag('br')); ms.body.append(el); ms.body.append(ms.new_string('\n'))
                 [ms.body.append(copy.copy(c)) for c in mg.body.children if c.name!='script']
                 sub.unlink(missing_ok=True)
