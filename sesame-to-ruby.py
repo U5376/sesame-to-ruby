@@ -27,6 +27,7 @@ class EpubProcessor:
         self.root = root
         self.regex_entries = []
         self.excluded_toc_entries = []
+        self.sesame_root = Path(tempfile.gettempdir(), "sesame_cache"); self.sesame_root.mkdir(parents=True, exist_ok=True)
         FONT = ("宋体", 12)
 
         # 设置窗口图标
@@ -178,7 +179,7 @@ class EpubProcessor:
         logger.info(f"开始处理epub文件: {self.epub_path}")
         class_name = self.class_name_var.get()
 
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=self.sesame_root) as temp_dir:
             logger.info(f"解压临时目录: {temp_dir}")
             with zipfile.ZipFile(self.epub_path, 'r') as zip_ref:
                 zip_ref.extractall(temp_dir)
@@ -508,7 +509,7 @@ class EpubProcessor:
             converter_path = base_dir / "image_converter.exe"
             if not converter_path.exists():
                 raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as list_file:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8', dir=self.sesame_root) as list_file:
                 list_file.write('\n'.join(original_images))
                 list_path = list_file.name
             logger.debug(f"[转换] 生成临时列表文件: {list_path}")
@@ -721,7 +722,7 @@ class EpubProcessor:
         # 1. 环境准备与记忆初始化
         self._fcache, self._saved_hrefs = {}, {item[1] for item in getattr(self, "excluded_toc_entries", [])}
         if hasattr(self, "_exclude_tempdir"): shutil.rmtree(self._exclude_tempdir, ignore_errors=True)
-        self._exclude_tempdir = tempfile.mkdtemp(); temp_path = Path(self._exclude_tempdir)
+        self._exclude_tempdir = tempfile.mkdtemp(dir=self.sesame_root); temp_path = Path(self._exclude_tempdir)
         with zipfile.ZipFile(self.epub_path) as z: [z.extract(n, temp_path) for n in z.namelist() if n.lower().endswith(('.opf', '.ncx', '.xml', '.html', '.xhtml', '.htm'))]
         opf = self._get_opf_path(temp_path)
         EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
