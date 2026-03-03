@@ -54,14 +54,14 @@ class ClassList:
                 logger.info(f"保存EPUB，共 {len(self.modified_files)} 个项被修改或删除。")
                 tmp_fd, tmp_path = tempfile.mkstemp(suffix=".epub"); os.close(tmp_fd)
                 with zipfile.ZipFile(self.epub_path, "r") as z_in, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as z_out:
-                    [z_out.writestr(item, z_in.read(item.filename)) for item in z_in.infolist() if item.filename not in self.modified_files]
-                    [z_out.writestr(path, content) for path, content in self.modified_files.items() if content]
+                    # 写入原包中未被修改的文件
+                    [z_out.writestr(item.filename, z_in.read(item.filename)) for item in z_in.infolist() if item.filename not in self.modified_files]
+                    # 写入内存中新增或修改的文件内容（包括_sync_opf生成的opf字节流），content为None则代表删除
+                    [z_out.writestr(path, content) for path, content in self.modified_files.items() if content is not None]
                 shutil.move(tmp_path, self.epub_path); self.modified_files.clear()
-                logger.success("修改已成功保存至epub。")
-                messagebox.showinfo("保存", "修改已成功保存至EPUB。", parent=cw)
+                logger.success("修改已成功保存至epub。"); messagebox.showinfo("保存", "修改已成功保存至EPUB。", parent=cw)
             except Exception as e: 
-                logger.exception(f"保存epub失败: {e}")
-                messagebox.showerror("保存失败", str(e), parent=cw)
+                logger.exception(f"保存epub失败: {e}"); messagebox.showerror("保存失败", str(e), parent=cw)
         
         ttk.Button(lf_top, text="保存", width=5, command=save_changes).pack(side="right")
         lf_tree_frame = ttk.Frame(lf); lf_tree_frame.pack(fill="both", expand=True, padx=(3, 0), pady=2)
@@ -74,7 +74,9 @@ class ClassList:
         ftree_menu = tk.Menu(ftree, tearoff=0)
         ftree_menu.add_command(label="删除文件", command=lambda: (sel := ftree.selection()) and 
                                     messagebox.askyesno("确认", f"确认删除选中的 {len(sel)} 个项目?", parent=cw) and 
-                                    [ (self.modified_files.__setitem__(ftree.item(i, "tags")[0], None), ftree.delete(i)) for i in sel ])
+                                    ([paths := [ftree.item(i, "tags")[0] for i in sel]], 
+                                    _sync_opf([p for p in paths if not p.endswith('/')]), # 局部函数 同步OPF引用删除
+                                    [(self.modified_files.__setitem__(p, None), ftree.delete(i)) for i, p in zip(sel, paths)]))
         ftree.bind("<Button-3>", lambda e: (iid := ftree.identify_row(e.y)) and (ftree.selection_add(iid), ftree_menu.post(e.x_root, e.y_root)))
 
         if DND_FILES:
@@ -270,6 +272,22 @@ class ClassList:
                 logger.exception(f"预览文件时发生错误: {ex}")
                 messagebox.showerror("错误", str(ex), parent=cw)
         ftree.bind("<Double-1>", preview_file)
+
+        # bs4解析并从内存/磁盘同步删除OPF引用
+        def _sync_opf(deleted_paths):
+                try:
+                    with zipfile.ZipFile(self.epub_path, 'r') as z:
+                        if not (opf_p := (BeautifulSoup(z.read("META-INF/container.xml"), "xml").find("rootfile") or {}).get("full-path")): return
+                        opf_dir = os.path.dirname(opf_p)
+                        # 优先从内存读取已有的修改，实现链式删除
+                        soup = BeautifulSoup(self.modified_files.get(opf_p) or z.read(opf_p), "xml")
+                    rel_ps = {os.path.relpath(p, opf_dir).replace("\\", "/") for p in deleted_paths}
+                    # 在提取 rid 时增加有效性检查，防止匹配到 None
+                    rem_ids = {rid for it in soup.find_all("item") if (rid := it.get("id")) and it.get("href") in rel_ps and [it.decompose()]}
+                    [it.decompose() for it in soup.find_all("itemref") if it.get("idref") in rem_ids]
+                    self.modified_files[opf_p] = soup.encode(formatter="minimal")
+                    logger.info(f"内存同步：OPF已剔除 {len(rem_ids)} 个引用")
+                except Exception as e: logger.error(f"OPF同步失败: {e}")
 
         # Bs4获取OPF Spine顺序 解析XML并构建映射
         def get_opf_spine_order(z):
