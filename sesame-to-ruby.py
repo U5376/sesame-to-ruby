@@ -338,7 +338,8 @@ class EpubProcessor:
         for e in toc:
             href = e.get('href') or ''
             title = e.get('title', '无标题')
-            is_ex = (title, href) in (ex := self.excluded_toc_entries) or any(title == t for t, _ in ex) or (title, href.split('#')[0]) in ex
+            # 排除逻辑：1.标题和href严格相同 2.标题相同且去锚点后href相同 3.标题相同
+            is_ex = (title, href) in (ex := self.excluded_toc_entries) or (title, href.split('#')[0]) in ex or any(title == t for t, _ in ex)
             if is_ex: logger.debug(f"跳过排除的目录条目: {title} | ({href})")
             f = (opf_dir / href.split('#', 1)[0]).resolve()
             if not f.exists(): logger.warning(f"目录条目文件不存在，已跳过: {title} | ({href})"); continue
@@ -742,9 +743,12 @@ class EpubProcessor:
             if tree.get_children(): self._saved_hrefs = {tree.item(i)["values"][1] for i in tree.selection()}
         def refresh():
             tree.delete(*tree.get_children())
+            ex = getattr(self, "excluded_toc_entries", [])
             for e in self._curr_toc:
-                iid = tree.insert("", "end", values=(("\u3000"*e.get('depth',0))+e.get('title',''), e['href']))
-                if e['href'] in self._saved_hrefs: tree.selection_add(iid)
+                t, h = e.get('title', ''), e['href']
+                iid = tree.insert("", "end", values=(("\u3000"*e.get('depth', 0)) + t, h))
+                # 匹配逻辑：1.记忆中的href 2.完整匹配 3.无锚点匹配 4.标题匹配
+                if h in self._saved_hrefs or (t, h) in ex or (t, h.split('#')[0]) in ex or any(t == x[0] for x in ex): tree.selection_add(iid)
         def run_splits():
             update_mem(); self._curr_toc, self._split_rules = self._init_toc.copy(), []
             for cb, en in regex_entries:
@@ -1014,7 +1018,6 @@ class WinSize:
 if __name__ == "__main__":
     logger.info("程序初始化")
     root = TkinterDnD.Tk()
-
     processor = EpubProcessor(root)
     logger.info("进入主循环")
     root.mainloop()
