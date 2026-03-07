@@ -1,9 +1,11 @@
+import atexit
 import os
 import re
 import sys
 import copy
 import zipfile
 import tempfile
+import time
 import subprocess
 import shutil
 from pathlib import Path
@@ -27,6 +29,7 @@ class EpubProcessor:
         self.root = root
         self.regex_entries = []
         self.excluded_toc_entries = []
+        self._exclude_tempdirs = set()
         self.sesame_root = Path(tempfile.gettempdir(), "sesame_cache"); self.sesame_root.mkdir(parents=True, exist_ok=True)
         FONT = ("宋体", 12)
 
@@ -722,8 +725,15 @@ class EpubProcessor:
         if not getattr(self, "epub_path", None): return messagebox.showwarning("警告", "请先选择EPUB文件")
         # 1. 环境准备与记忆初始化
         self._fcache, self._saved_hrefs = {}, {item[1] for item in getattr(self, "excluded_toc_entries", [])}
-        if hasattr(self, "_exclude_tempdir"): shutil.rmtree(self._exclude_tempdir, ignore_errors=True)
-        self._exclude_tempdir = tempfile.mkdtemp(dir=self.sesame_root); temp_path = Path(self._exclude_tempdir)
+        # 使用文件修改时间和路径哈希生成唯一的临时目录，避免多次操作时的冲突
+        st = Path(self.epub_path).stat()
+        h_p = abs(hash(str(Path(self.epub_path).resolve())))
+        ts = time.strftime("%y%m%d_%H%M%S", time.localtime(st.st_mtime))
+        self._exclude_tempdir = self.sesame_root / f"epub_exclude_{h_p}_{ts}"
+        self._exclude_tempdir.mkdir(parents=True, exist_ok=True)
+        self._exclude_tempdirs.add(self._exclude_tempdir)
+        temp_path = self._exclude_tempdir
+
         with zipfile.ZipFile(self.epub_path) as z: [z.extract(n, temp_path) for n in z.namelist() if n.lower().endswith(('.opf', '.ncx', '.xml', '.html', '.xhtml', '.htm'))]
         opf = self._get_opf_path(temp_path)
         EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
@@ -1019,5 +1029,6 @@ if __name__ == "__main__":
     logger.info("程序初始化")
     root = TkinterDnD.Tk()
     processor = EpubProcessor(root)
+    atexit.register(lambda: [shutil.rmtree(d, ignore_errors=True) for d in getattr(processor, '_exclude_tempdirs', set())])
     logger.info("进入主循环")
     root.mainloop()
