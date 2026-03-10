@@ -212,14 +212,14 @@ class EpubProcessor:
                 if not success:
                     logger.warning(f"版本转换警告: {msg}")
 
-            # 章节间合并
-            if self.merge_xhtml_enabled.get():
-                self.merge_xhtml_files(temp_dir)
-            
             # 重新解析目录 正则匹配追加、分割章节
             opf_path = self._get_opf_path(temp_dir)
             toc_data = self._parse_toc(BeautifulSoup(opf_path.read_text('utf-8'), 'xml'), opf_path)
             self._apply_regex_split(temp_dir, toc_data)
+
+            # 章节间合并
+            if self.merge_xhtml_enabled.get():
+                self.merge_xhtml_files(temp_dir)
 
             # 遍历所有文件并处理
             for xf in Path(temp_dir).rglob("*"):
