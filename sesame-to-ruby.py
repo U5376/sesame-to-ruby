@@ -753,10 +753,13 @@ class EpubProcessor:
             if tree.get_children(): self._saved_hrefs = {tree.item(i)["values"][1] for i in tree.selection()}
         def refresh():
             tree.delete(*tree.get_children())
+            tree.tag_configure("mis", font=("", 10, "overstrike"), foreground="gray") # 定义删除线样式
             ex = getattr(self, "excluded_toc_entries", [])
             for e in self._curr_toc:
                 t, h = e.get('title', ''), e['href']
-                iid = tree.insert("", "end", values=(("\u3000"*e.get('depth', 0)) + t, h))
+                # 判定：非虚拟章节且物理文件不存在时，标记为 mis
+                tag = ("mis",) if "_spt_" not in h and not (opf.parent / h.split('#')[0]).exists() else ()
+                iid = tree.insert("", "end", values=(("\u3000"*e.get('depth', 0)) + t, h), tags=tag)
                 # 匹配逻辑：1.记忆中的href 2.完整匹配 3.无锚点匹配 4.标题匹配
                 if h in self._saved_hrefs or (t, h) in ex or (t, h.split('#')[0]) in ex or any(t == x[0] for x in ex): tree.selection_add(iid)
         def run_splits():
@@ -813,7 +816,6 @@ class EpubProcessor:
         except: return None
         if not hasattr(self, "_fcache"): self._fcache = {}
         opf, new_toc, dep, s_rules = self._get_opf_path(Path(temp_dir)), [], 0, split_rules or []
-        strike = lambda t: "".join([c + "\u0336" for c in t])
         lookup = {t['href'].split('#')[0].split('/')[-1]: t for t in current_toc}
         for hf in self._get_spine_ordered_files(opf):
             if (n := hf.name) in lookup: new_toc.append(e := lookup.pop(n)); dep = e.get('depth', 0)
@@ -826,7 +828,8 @@ class EpubProcessor:
                     lvl = next((r[2] for r in s_rules if re.search(f"(?:{r[0]})", matched)), 2)
                     new_toc.append({'title': self._clean_title(matched) or f"Sec {i}", 
                                     'href': f"{hf.stem}_spt_{i:03d}.xhtml", 'depth': dep + lvl - 1})
-        return [dict(v, title=strike(v['title'])) for v in lookup.values()] + new_toc
+        for remain_node in lookup.values(): new_toc.append(remain_node) # 保留失效条目
+        return new_toc
 
     def _apply_regex_split(self, temp_dir, current_toc=None):
         """正则匹配子章节追加分割逻辑"""
