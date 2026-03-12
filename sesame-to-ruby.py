@@ -753,6 +753,7 @@ class EpubProcessor:
             # 通过绑定的iid(即索引)，直接从源数据获取原始 href，避免 UI 污染
             if tree.get_children(): self._saved_hrefs = {self._curr_toc[int(i)]['href'] for i in tree.selection()}
         def refresh():
+            ttk.Style().map("Treeview", foreground=[e for e in ttk.Style().map("Treeview", query_opt="foreground") if e[:2] != ("!disabled", "!selected")]) #修复py3.8 Tk8.6.9树视图tag颜色失效Bug
             tree.delete(*tree.get_children())
             tree.tag_configure("mis", font=("", 10, "overstrike"), foreground="gray") # 定义删除线样式
             ex = getattr(self, "excluded_toc_entries", [])
