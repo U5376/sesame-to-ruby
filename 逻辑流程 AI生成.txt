@@ -1,15 +1,27 @@
 文件列表
 主程序sesame-to-ruby.py
-epub_ncx_generator.py #生成toc.ncx 转epub2.0 更新opf信息 移除nav.xhtml
+epub_ncx_generator.py #生成toc.ncx 转epub2.0 修正目录偏移 补全后记 更新opf信息 移除nav.xhtml
 regex_manager.py #管理正则表达式规则和工具提示
 tooltip.py #提供GUI元素的悬浮提示功能
+class_list.py #HTML class分析工具 文件树/拖拽/预览/搜索
+Image.py #图标资源(Base64编码)
 image_converter.py/exe #处理图片格式转换
 
 
 1. EpubProcessor.__init__（初始化界面）
    - 功能：创建应用主界面并初始化所有组件
    - 详细流程：
-     * 创建Tkinter主窗口，设置标题和图标(note.ico)
+     * 创建Tkinter主窗口，设置标题和图标(icon_base64)
+     * 初始化转换选项配置(CFG)：
+       - 傍点转ruby(class_name_var)
+       - Ruby格式规格化(process_ruby_enabled)
+       - 图片标签多看交互规格化(process_images_enabled)
+       - Xhtml章节间合并(merge_xhtml_enabled + 分隔符/空行控制)
+       - 删除自带Style并添加自定义样式表(delete_style_enabled)
+       - 生成ncx并更新opf(generate_ncx_enabled + 偏移/强制偏移/补全后记)
+       - 转Epub2.0并删除nav.xhtml(convert_epub_version_enabled)
+       - 转换图片(convert_images_var + 参数配置)
+       - 语言标识(set_lang_enabled + 语言参数)
      * 初始化RegexManager组件：
        - 从config.ini加载用户自定义正则规则
        - 若无配置则创建默认规则(清理body/div/p标签样式等)
@@ -17,99 +29,139 @@ image_converter.py/exe #处理图片格式转换
      * 绑定规则保存按钮到主程序保存方法
      * 初始化批量转换按钮和单文件处理功能
      * 初始化辅助功能按钮：
-       - 样式收集分析(show_class_list): 扫描EPUB中使用的CSS类
-       - 目录排除(show_exclude_dialog): 设置不合并的章节
-       - 重置设置(reset_app_settings): 恢复默认配置
+       - 样式收集分析(show_class_list): 扫描EPUB中使用的CSS类，支持拖拽/预览/搜索
+       - 排除合并(show_exclude_dialog): 设置不合并的章节，支持正则追加分割章节
+       - 重置设置(reset_app_settings): 恢复默认配置，右键清理内存winsize
      * 加载应用设置(load_app_settings)
+     * 窗口坐标大小记忆(WinSize类)
 
 2. EpubProcessor.open_file_dialog（文件选择）
-   - 用户选择输入/输出EPUB文件
+   - 用户选择输入EPUB文件
+   - 支持拖拽epub到窗口
 
-3. EpubProcessor.process_epub（解压处理）
-   - 解压EPUB到临时目录（zipfile.ZipFile.extractall）
-   - 解析container.xml获取OPF路径（_parse_toc）
+3. EpubProcessor.process_epub（核心处理流程）
+   1) 解压EPUB到临时目录(sesame_cache)
+   2) 解析container.xml获取OPF路径(_get_opf_path)
+   3) 图片转换(可选)：convert_epub_images
+      - 扫描图片文件
+      - 使用image_converter.exe转换格式
+      - 更新HTML图片引用
+      - 清理旧图片
+      - 更新OPF媒体类型
+   4) 处理OPF文件和样式表：process_opf_and_styles
+      - 删除自带Style并添加自定义样式表
+      - 设置语言标识(opf/head)
+      - 规格化头部信息
+   5) 生成ncx并更新opf：EpubNCXGenerator.generate_ncx
+      - 基于NAV构建层级目录
+      - 生成toc.ncx文件
+   6) 修正ncx路径：EpubNCXGenerator.fix_ncx_paths
+      - 目录偏移(检测文件不存在时自动-1修正)
+      - 强制偏移(手动设置偏移值)
+      - 补全后记(自动补全缺失的あと古迹条目)
+   7) 转Epub2.0并删除nav.xhtml(可选)：EpubNCXGenerator.convert_to_epub2
+      - 修改package声明为version="2.0"
+      - 删除epub3.0的prefix属性
+      - 移除nav.xhtml文件
+   8) 正则追加、分割章节(可选)
+      - 重新解析目录(_parse_toc)
+      - 正则匹配追加新章节(_apply_regex_split)
+   9) 章节间合并(可选)：merge_xhtml_files
+      - 解析OPF获取spine顺序和目录结构
+      - 根据目录条目确定合并范围
+      - 添加分隔符(双br标签夹hr标签)
+      - 更新OPF，移除已合并文件引用
+      - 支持排除特定目录条目
+   10) 遍历所有xhtml/html文件处理：
+       a. Ruby格式规格化：process_ruby
+          - 合并连续的ruby标签
+          - 提取<img>标签到Ruby外部
+          - 合并多个<rt>内容
+          - 清理多余的rb标签
+       b. 傍点转ruby：modify_html
+          - 转换class指定的<span>/<em>为<ruby>
+          - 创建rt标签并添加"・"
+       c. 正则替换：regex_manager.apply_rules
+          - 按顺序应用每条正则规则
+       d. 图片标签多看交互规格化：post_process_images
+          - div/p包裹的图片规格化
+          - svg和ops:switch标签兼容
+          - 排除span跟gaiji标签
+   11) 空行处理：process_blank_lines
+       - 删除指定数量的空行
+       - 限制连续空行的最大数量
+   12) 重新打包EPUB
 
-4. EpubProcessor.process_opf_and_styles（OPF核心处理）
-   - 功能：处理OPF文件和样式表
-     * 使用BeautifulSoup删除page-progression-direction属性
-     * 清理CSS引用(删除item[media-type="text/css"])
-     * 添加自定义样式表(style.css)到XHTML文件头
-
-5. EpubNCXGenerator.generate_ncx（生成NCX）
-   - 基于NAV构建层级目录（_parse_nav递归解析列表）
+4. EpubNCXGenerator.generate_ncx（生成NCX）
+   - 基于NAV构建层级目录(_parse_nav递归解析列表)
      * _parse_nav: 递归解析NAV结构构建层级
      * _create_ncx_content: 生成toc.ncx文件内容
+   - 自动对照opf列表修正路径
 
-6. EpubNCXGenerator.convert_to_epub2（版本转换）
+5. EpubNCXGenerator.convert_to_epub2（版本转换）
    - 将EPUB3.0转换为EPUB2.0格式
      * 修改package声明为version="2.0"
      * 删除epub3.0的prefix属性
      * 移除nav.xhtml文件
 
-7. 文件处理阶段（循环处理每个XHTML文件）：
-   a. EpubProcessor.process_ruby（Ruby规范化 | def process_ruby）
-      - 提取<img>标签到Ruby外部（copy.copy处理）
-      - 合并多个<rt>内容（merged_content生成）
-   
-   b. EpubProcessor.apply_regex_rules（正则预处理）
-      - 从RegexManager获取所有已编译的正则规则
-      - 按顺序应用每条规则到文件内容
-      - 处理正则替换错误并记录日志
-   
-   c. EpubProcessor.modify_html（傍点转换）
-      - 转换class指定的<span>为<ruby>（创建rt标签并添加"・"）
-   
-   d. EpubProcessor.post_process_images（图片图片规格化）
-      - 主要div跟P标签规格化成多看交互标签
-      - SVG标签兼容
-      - 暂不处理span跟gaiji标签
+6. EpubNCXGenerator.fix_ncx_paths（目录修正）
+   - 偏移功能：最后一条目录文件不存在时自动-1修正
+   - 强制偏移：手动设置偏移值，优先于自动偏移
+   - 补全后记：自动补全ncx/nav缺失的あと古迹条目
 
-   e. EpubProcessor.process_blank_lines（空行处理）
-      - 删除指定数量的空行
-      - 限制连续空行的最大数量
-
-8. EpubProcessor.merge_xhtml_files（章节合并）
+7. EpubProcessor.merge_xhtml_files（章节合并）
    - 解析OPF文件获取spine顺序和目录结构
    - 根据目录条目确定合并范围
    - 主文件保留，合并文件内容转移到主文件
-   - 添加分隔符（双br标签夹hr标签）
+   - 添加分隔符(双br标签夹hr标签)
    - 更新OPF文件，移除已合并文件的引用
    - 支持用户排除特定目录条目不合并
 
-9. EpubProcessor.convert_epub_images（图片转换）
+8. EpubProcessor.convert_epub_images（图片转换）
    - 扫描EPUB中所有图片文件
    - 使用image_converter.exe转换图片格式
+   - 参数配置：-f格式 -q质量 -H/-W高宽 -s锐化 -A透明 -w线程 -m压缩等级
    - 更新HTML文件中的图片引用
    - 清理旧图片文件
    - 更新OPF清单中的媒体类型
 
-10. EpubProcessor.batch_convert_epubs（批量转换）
-    - 选择多个EPUB文件
-    - 为每个文件创建输出目录(output)
-    - 依次处理每个EPUB文件
-    - 保存转换结果到输出目录
-    - 记录转换状态和错误
+9. EpubProcessor.batch_convert_epubs（批量转换）
+   - 选择多个EPUB文件
+   - 为每个文件创建输出目录(output)
+   - 依次处理每个EPUB文件
+   - 保存转换结果到输出目录
+   - 记录转换状态和错误
 
-11. 应用设置管理
+10. 应用设置管理
     - 保存设置(save_app_settings)
       * 保存正则规则到config.ini
-      * 保存应用配置选项
+      * 保存应用配置选项(WinSize)
     - 加载设置(load_app_settings)
       * 从config.ini读取配置
       * 恢复界面状态
     - 重置设置(reset_app_settings)
       * 恢复默认选项值
+      * 右键清理内存winsize
 
-12. 辅助功能
+11. 辅助功能
     - 样式收集分析(show_class_list)
       * 扫描EPUB中使用的CSS类
-      * 显示span和图片的特殊类
-      * 支持查看样式定义详情
-    - 目录排除(show_exclude_dialog)
+      * 文件树浏览，支持拖入拖出导出导入
+      * 预览文件内容，支持正则匹配搜索
+      * 显示样式定义详情和实例
+      * 支持临时样式编辑和追加
+      * 可按字母/总量排序
+    - 排除合并(show_exclude_dialog)
       * 解析EPUB目录结构
       * 提供GUI选择要排除合并的章节
-      * 保存用户选择
+      * 支持正则追加分割章节
+      * 预览功能可实时查看内容
+      * 右键管理排除列表
+    - 正则管理(RegexManager)
+      * 多配置文件(ini)管理
+      * 右键复制/删除/重命名配置
+      * 日志级别切换(debug/info)
 
-13. 最终打包
+12. 最终打包
     - 重新压缩为EPUB（zipfile.ZipFile写入）
     - 保留META-INF/container.xml结构
