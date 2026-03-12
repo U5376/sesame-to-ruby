@@ -49,7 +49,7 @@ class EpubProcessor:
             ('开始转换', self.start_conversion, (0, 1), "转换加载的单个epub文件"),
             ('批量转换', self.batch_convert_epubs, (0, 2), "批量转换\n支持epub拖拽到按钮\n原名文件保存至output文件夹"),
             ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
-            ('排除合并', self.show_exclude_dialog, (1, 1), "章节合并功能排除选定的目录条目\n批量也能排除指定的章节名\n右键管理排除列表"),
+            ('排除合并', self.show_exclude_dialog, (1, 1), "优先显示nav后显示ncx.注意偏移只对ncx生效\n章节合并功能排除选定的目录条目\n批量也能排除指定的章节名\n右键管理排除列表"),
             ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态\n右键重置内存winsize值"),
         ]
         for text, cmd, (row, col), tip in btn_cfgs:
@@ -78,8 +78,8 @@ class EpubProcessor:
                 ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
             ('delete_style_enabled', '删除自带Style并添加自定义样式表', '清理原有样式跟opf竖排属性\n添加css文件及更新引用\n规格化头部信息', []),
             ('generate_ncx_enabled', '生成ncx并更新opf', '自动对照opf列表修正路径', [
-                ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (3, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移'),
-                ('ncx_manual_offset_val', '0', tk.Entry, {'w': 3, 'px': (0, 0)}, '强制目录偏移+ -，0不执行操作\n优先于自动偏移'),
+                ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (3, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移\n只用于ncx nav没写'),
+                ('ncx_manual_offset_val', '0', tk.Entry, {'w': 3, 'px': (0, 0)}, '强制目录偏移+ -，0不执行操作\n优先于自动偏移\n只用于ncx nav没写'),
                 ('ncx_atokagi_enabled', '补全后记', tk.Checkbutton, {'px': (3, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
             ('convert_epub_version_enabled', '转Epub2.0并删除nav.xhtml', '将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明', []),
             ('convert_images_var', '转换图片', '图片转换设置', [
@@ -750,16 +750,17 @@ class EpubProcessor:
         [tree.heading(c, text=t) or tree.column(c, width=w) for c, t, w in [("t", "目录 (选中不合并)", 350), ("h", "HTML文件", 150)]]
 
         def update_mem(): 
-            if tree.get_children(): self._saved_hrefs = {tree.item(i)["values"][1] for i in tree.selection()}
+            # 通过绑定的iid(即索引)，直接从源数据获取原始 href，避免 UI 污染
+            if tree.get_children(): self._saved_hrefs = {self._curr_toc[int(i)]['href'] for i in tree.selection()}
         def refresh():
             tree.delete(*tree.get_children())
             tree.tag_configure("mis", font=("", 10, "overstrike"), foreground="gray") # 定义删除线样式
             ex = getattr(self, "excluded_toc_entries", [])
-            for e in self._curr_toc:
+            for idx, e in enumerate(self._curr_toc):
                 t, h = e.get('title', ''), e['href']
                 # 判定：非虚拟章节且物理文件不存在时，标记为 mis
-                tag = ("mis",) if "_spt_" not in h and not (opf.parent / h.split('#')[0]).exists() else ()
-                iid = tree.insert("", "end", values=(("\u3000"*e.get('depth', 0)) + t, h), tags=tag)
+                tag = ("mis",) if "_spt_" not in h and not (opf.parent / unquote(h.split('#')[0])).exists() else ()
+                iid = tree.insert("", "end", iid=str(idx), values=(("\u3000"*e.get('depth', 0)) + t, unquote(h)), tags=tag)
                 # 匹配逻辑：1.记忆中的href 2.完整匹配 3.无锚点匹配 4.标题匹配
                 if h in self._saved_hrefs or (t, h) in ex or (t, h.split('#')[0]) in ex or any(t == x[0] for x in ex): tree.selection_add(iid)
         def run_splits():
@@ -791,7 +792,8 @@ class EpubProcessor:
             self._saved_regex_list = [en.get().strip() for _, en in regex_entries if en.get().strip()] or [""]
             self._saved_regex_levels = [2 if cb.get() == "层级2(子章节)" else 1 for cb, en in regex_entries]
             exist = {i[1] for i in getattr(self, "excluded_toc_entries", [])}
-            new_items = [(tree.item(i)["values"][0], tree.item(i)["values"][1]) for i in tree.selection()]
+            # 通过iid(索引)直接从_curr_toc提取原始title和href
+            new_items = [(self._curr_toc[int(i)].get('title', ''), self._curr_toc[int(i)]['href']) for i in tree.selection()]
             self.excluded_toc_entries = getattr(self, "excluded_toc_entries", []) + [x for x in new_items if x[1] not in exist]
             self.toc_data = self._curr_toc; dialog.destroy()
         ttk.Button(inner_box, text="追加排除条目/正则追加&分割子章节", command=on_confirm).pack(side="left", padx=5)
@@ -800,7 +802,7 @@ class EpubProcessor:
         """获取按 Spine 顺序排列的 HTML 文件列表"""
         soup = BeautifulSoup(opf_path.read_text('utf-8'), 'xml')
         m = {it['id']: it['href'] for it in soup.find('manifest').find_all('item')}
-        return [f for r in soup.find('spine').find_all('itemref') if (f := opf_path.parent / m.get(r.get('idref', ''))) 
+        return [f for r in soup.find('spine').find_all('itemref') if (idr := r.get('idref')) and (href := m.get(idr)) and (f := opf_path.parent / href)
                 and f.exists() and f.suffix.lower() in ['.html', '.xhtml', '.htm']]
 
     def _clean_title(self, html_fragment):
