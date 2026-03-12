@@ -2,7 +2,7 @@ import re
 import uuid
 import shutil
 from pathlib import Path
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from loguru import logger
 
 class EpubNCXGenerator:
@@ -361,11 +361,11 @@ class EpubNCXGenerator:
 
     @staticmethod
     def insert_sub_chapters(opf_path, parent_href, sub_chapters):
-        """插入子章节(支持层级: 1=同级并更新父节点, 2=子级)"""
+        """插入子章节(相对层级: 1=父节点的同级节点, 2=父节点的子节点)"""
         if not sub_chapters or not (ps := EpubNCXGenerator._find_nav_path(opf_path)): return 0
         target_fn, added_this_time = Path(parent_href.split('#')[0]).name, 0
 
-        # ncx 处理：解析 -> 内存递归插入 -> 重写ncx格式.按顺序根据 depth 决定是插入兄弟列表还是子列表
+        # ncx 处理：解析 -> 内存递归插入 -> 重写ncx格式.按顺序根据depth相对插入同级或次级条目
         if (nx_p := ps.get('ncx')) and nx_p.exists():
             entries = EpubNCXGenerator._parse_ncx_to_entries(nx_p)
             def inject(nodes):
@@ -377,10 +377,10 @@ class EpubNCXGenerator:
                                    'href': s['href'], 'children': []}
                             if s.get('depth', 2) == 1: # 1级: 插入nodes列表(兄弟) 并更新当前父节点
                                 nodes.insert(idx, new); cur, idx = new, idx + 1
-                            else: cur['children'].append(new) # 2级: 插入当前父节点下
+                            else: cur.setdefault('children', []).append(new) # 2级: 插入当前父节点下 增加容错防御
                             cnt += 1
                         return cnt
-                    if (res := inject(n['children'])) is not None: return res
+                    if n.get('children') and (res := inject(n['children'])) is not None: return res
             if (cnt := inject(entries)) is not None:
                 nx_p.write_text(EpubNCXGenerator._create_ncx_content(EpubNCXGenerator._get_uid_from_opf(opf_path), entries, 
                                 EpubNCXGenerator._get_book_title_from_opf(opf_path)), 'utf-8')
@@ -394,11 +394,13 @@ class EpubNCXGenerator:
                 cur_ol, cnt = cur_li.find(['ol', 'ul']), 0
                 for s in sub_chapters:
                     (nl := sp.new_tag('li')).append(sp.new_tag('a', href=s['href'], string=s['title']))
-                    if s.get('depth', 2) == 1: # 1级: 插在当前li后, 变为新父节点, 重置子列表容器
-                        cur_li.insert_after(nl); cur_li, cur_ol = nl, None
-                    else: # 2级: 放入子列表容器(若无则创建)
-                        if not cur_ol: cur_li.append(cur_ol := sp.new_tag('ol'))
-                        cur_ol.append(nl)
+                    if s.get('depth', 2) == 1: # 1级: 紧接在同级节点后插入，并更新基准
+                        cur_li.insert_after(NavigableString('\n')); cur_li.next_sibling.insert_after(nl)
+                        cur_li, cur_ol = nl, None
+                    else: # 2级: 放入内部列表 (ol/ul)，采用 extend 高密度压入换行符
+                        if not cur_ol: 
+                            cur_li.extend([NavigableString('\n'), cur_ol := sp.new_tag('ol'), NavigableString('\n')])
+                        cur_ol.extend([NavigableString('\n'), nl, NavigableString('\n')])
                     cnt += 1
                 if cnt:
                     nv_p.write_text(sp.decode(formatter='html'), 'utf-8')
