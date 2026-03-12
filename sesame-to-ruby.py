@@ -880,13 +880,11 @@ class EpubProcessor:
                 opf_p.write_text(str(soup), 'utf-8')
             try:
                 if (added := EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, subs)):
-                    total += (target := subs[-1]) and added
-                    # 锚点更新逻辑：同级 则锚点切换到最后一个新增章节；子级 锚点维持不变
-                    if target.get('depth', 2) == 1:
-                        old_h, last_href = last_href, target['href']
-                        logger.debug(f"锚点变更(同级): 从 {old_h} 切换至 {last_href}, 共新增 {added} 个同级章节")
-                    else:
-                        logger.debug(f"锚点维持(子级): 依然使用 {last_href}, 包含 {len(subs)} 个子项")
+                    total += added
+                    # 锚点更新逻辑：反向查找最后一个同级(depth=1)节点，规避全量列表生成跟层级塌陷.depth=2次级节点不更新，保持原父级锚点
+                    if (l1_href := next((s['href'] for s in reversed(subs) if s.get('depth', 2) == 1), None)):
+                        old_h, last_href = last_href, l1_href
+                        logger.debug(f"锚点更新(同级): {old_h} -> {last_href} (新增 {added} 章节)")
             except Exception as e: logger.error(f"插入章节失败: {e}")
         if total > 0: logger.info(f"追加/分割章节完成: 共 {total} 条子章节")
         return current_toc
