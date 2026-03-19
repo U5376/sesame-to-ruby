@@ -217,6 +217,7 @@ class ClassList:
                 ttk.Checkbutton(sf, text="全局匹配", variable=global_search_var, command=lambda: do_find(reset=True)).pack(side="left", padx=5)
                 sl = ttk.Label(sf, text="0/0"); sl.pack(side="right", padx=5)
                 [ttk.Button(sf, text=t, width=3, command=lambda r=v: do_find(rev=r)).pack(side="right") for t, v in [("↓", 0), ("↑", 1)]]
+                # wrap="word"可能会造成卡顿 下面换行逻辑暂时解决了 不过还是留个注释 可改为wrap="char"减轻渲染压力
                 txt = tk.Text(win, font=('Consolas', 10), wrap="word")
                 sv = ttk.Scrollbar(win, command=txt.yview); txt.config(yscrollcommand=sv.set)
                 [f.pack(side=s, fill=y, expand=e) for f,s,y,e in [(sv,"right","y",0), (txt,"left","both",1)]]
@@ -227,6 +228,8 @@ class ClassList:
                     state["current_file"] = fpath; win.title(fpath)
                     content = (self.modified_files[fpath].decode('utf-8', 'ignore') if fpath in self.modified_files and self.modified_files[fpath] is not None else
                             zipfile.ZipFile(self.epub_path, 'r').read(fpath).decode('utf-8', 'ignore') if fpath in zipfile.ZipFile(self.epub_path, 'r').namelist() else "")
+                    # 为极长的标签块换行 大幅降低wrap="word"的渲染压力
+                    content = re.sub(r'(</(?:div|p|h[1-6]|ul|ol|li|section|html|body|table)>)\s*', r'\1\n', content, flags=re.I)
                     txt.config(state="normal"); txt.delete("1.0", "end"); txt.insert("1.0", content); txt.config(state="disabled")
                     [(ftree.selection_set(n), ftree.see(n)) for n in self.n_map.values() if n and ftree.exists(n) and ftree.item(n, "tags")[0] == fpath]
 
@@ -251,10 +254,12 @@ class ClassList:
                     state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(state["search_results"]) if not reset else state["search_index"]
                     target = state["search_results"][state["search_index"]]
                     if target["path"] != state["current_file"]: load_content_to_text(target["path"])
-                    # 批量高亮所有匹配项
-                    s_idx, cv = "1.0", tk.IntVar()
-                    while (s_idx := txt.search(q, s_idx, "end", count=cv, regexp=True)): 
-                        txt.tag_add("m", s_idx, (e_idx := f"{s_idx}+{cv.get()}c")); s_idx = e_idx
+                    # 批量高亮所有匹配项 (分批渲染防止卡顿)
+                    s_idx, cv, m_rs = "1.0", tk.IntVar(), []
+                    while (s_idx := txt.search(q, s_idx, "end", count=cv, regexp=True)):
+                        m_rs.extend((s_idx, s_idx := f"{s_idx}+{cv.get()}c"))
+                        if len(m_rs) >= 1000: txt.tag_add("m", *m_rs); m_rs.clear() # 500个匹配项一批 分批渲染
+                    if m_rs: txt.tag_add("m", *m_rs)
                     # 高亮并跳转到当前特定匹配项
                     m_idx, s_idx = sum(1 for i in range(state["search_index"]) if state["search_results"][i]["path"] == target["path"]), "1.0"
                     for _ in range(m_idx + 1): 
