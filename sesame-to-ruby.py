@@ -12,6 +12,12 @@ from pathlib import Path
 from urllib.parse import unquote
 import configparser
 
+# 多线程并发导入
+import threading
+import multiprocessing
+import concurrent.futures
+
+import psutil
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -23,6 +29,240 @@ from tooltip import ToolTip
 from epub_ncx_generator import EpubNCXGenerator
 from regex_manager import RegexManager, AutoScrollbar
 from class_list import ClassList
+
+# ===================================================================== #
+# 多进程工作函数 (提取到模块层级，脱离GUI依赖，实现纯数据流转)
+
+def mp_fmt(soup):
+    """格式化 BeautifulSoup 对象为 HTML 字符串"""
+    from bs4.formatter import HTMLFormatter, EntitySubstitution
+    sub_func = getattr(EntitySubstitution, 'substitute_xml', 
+                       getattr(EntitySubstitution, 'substitute_xml_entities', None))
+    return soup.decode(formatter=HTMLFormatter(entity_substitution=lambda s: 
+        sub_func(s).replace('\u00A0', '&#160;')))
+
+def mp_process_ruby(soup):
+    """Ruby标签规格化处理 合并连续的ruby标理"""
+    ruby_tags, i = soup.find_all('ruby'), 0
+    while i < len(ruby_tags) - 1:
+        c, n = ruby_tags[i], ruby_tags[i + 1]
+        # 检查两个ruby标签是否相邻
+        s = c.next_sibling
+        while s and (not getattr(s, 'name', None)) and not s.strip(): s = s.next_sibling
+        if s is n:
+            [c.append(x) for x in list(n.contents)]  # 合并两个ruby标签
+            n.decompose()
+            ruby_tags.pop(i + 1)  #  性能优化：更新本地列表
+        else: i += 1
+    for ruby_tag in ruby_tags:  # 遍历所有ruby标签
+        rt_tags = ruby_tag.find_all('rt')
+        if rt_tags and rt_tags[0].get_text(strip=True).startswith('・'):continue  # 跳过rt标签后以・开头则跳过的ruby
+        img_tags = ruby_tag.find_all('img')  # 查找ruby内所有img标签
+        merged_content = ''.join(t for t in [rt.get_text(strip=True) for rt in rt_tags] if t)  # 合并 <rt> 标签 忽略所有的嵌套标签
+        for rt in rt_tags: rt.extract()  # 删除残留的原rt标签
+        for rb in ruby_tag.find_all('rb'): rb.unwrap() # 删除全部rb标签
+        if img_tags:  # ruby内含图片的处理
+            for child in list(ruby_tag.contents):  # 遍历ruby内所有子节点
+                if getattr(child, 'name', None) != 'rt':  # 除rt标签内容
+                    ruby_tag.insert_before(child.extract() if hasattr(child, 'extract') else child)  # 搬到ruby前面
+            new_ruby = soup.new_tag('ruby')  # 创建新ruby标签
+            new_ruby.string = '\u00A0'  # 空占位符 预防空标签不显示内容
+            rt = soup.new_tag('rt')  # 创建新rt标签
+            rt.string = merged_content if merged_content else '\u00A0'  # rt内容或空占位
+            new_ruby.append(rt)  # 添加rt到ruby
+            ruby_tag.replace_with(new_ruby)  # 用新ruby替换原ruby
+        else:  # 正常ruby标签处理
+            original_content = ruby_tag.get_text().replace('\n', '')  # 获取原内容并去除换行
+            new_ruby = soup.new_tag('ruby')  # 创建新ruby标签
+            new_ruby.string = original_content  # 设置ruby正文
+            rt = soup.new_tag('rt')  # 创建新rt标签
+            rt.string = merged_content  # 设置rt内容
+            new_ruby.append(rt)  # 添加rt到ruby
+            ruby_tag.replace_with(new_ruby)  # 用新ruby替换原ruby
+
+def mp_modify_html(soup, class_names):
+    """傍点转Ruby"""
+    classes = [c.strip() for c in class_names.split('|') if c.strip()]
+    for class_name in classes:
+        # 使用 soup.select 替代 re 匹配，更准确且快
+        for span in soup.select(f'span[class~="{class_name}"], em[class~="{class_name}"]'): 
+            # 获取纯文本，防止 span 内部有其他标签导致 .string 为空
+            text_content = span.get_text() 
+            if text_content:
+                ruby = soup.new_tag('ruby')
+                for char in text_content:
+                    ruby.append(soup.new_string(char))
+                    rt_tag = soup.new_tag('rt')
+                    rt_tag.append(soup.new_string("・"))
+                    ruby.append(rt_tag)
+                span.replace_with(ruby)
+
+def mp_post_process_images(soup):
+    """
+    图片标签多看交互规格化
+    合并处理div和p标签处理逻辑 改成遍历所有img标签
+    删除img标签内style 如果没有alt则填充空白alt 排除span标签跟class=gaiji的标签
+    """
+    for img in soup.find_all('img'):
+        if 'gaiji' in img.get('class', []): continue
+        parent = img.parent
+        if parent.name in ('div', 'p'): # 仅当父标签是div或p时才考虑规格化，且排除span标签跟class=gaiji的标签
+            if all(
+                c == img or
+                (getattr(c, 'name', None) == 'br') or
+                (isinstance(c, str) and not c.strip())
+                for c in parent.contents
+            ):
+                img.attrs.pop('style', None)
+                img['alt'] = img.get('alt', '')
+                new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
+                img.extract()
+                new_div.append(img)
+                parent.replace_with(new_div)
+    # 处理 svg 和 ops:switch
+    for tag in soup.find_all(['svg', 'ops:switch']):
+        if tag.name == 'svg' or (tag.name == 'ops:switch' and tag.find('svg')):
+            image_tag = tag.find('image')
+            if image_tag:
+                href = image_tag.get('xlink:href') or image_tag.get('{http://www.w3.org/1999/xlink}href')
+                if href:
+                    new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
+                    new_img = soup.new_tag('img', src=href, alt='')
+                    new_div.append(new_img)
+                    # 如果是 ops:switch 标签，直接替换整个标签
+                    if tag.name == 'ops:switch':
+                        tag.replace_with(new_div)
+                    else:  # 如果是 svg，替换 svg
+                        tag.replace_with(new_div)
+
+def mp_process_blank_lines(soup, remove_blank, limit_blank):
+    """全局空行清理与连续空行限制"""
+    def is_blank_tag(tag):
+        if tag.name == 'br': return True
+        if tag.name == 'p':
+            children = [c for c in tag.children if isinstance(c, (str, type(tag)))]
+            if len(children) == 1 and getattr(children[0], 'name', None) == 'br': return True
+            if not tag.get_text(strip=True) and all((getattr(c, 'name', None) == 'br' or (isinstance(c, str) and not c.strip())) for c in tag.contents): return True
+            return False
+        if tag.name == 'div':
+            for c in tag.contents:
+                if isinstance(c, str) and c.strip(): return False
+                if hasattr(c, 'name'):
+                    if c.name == 'br': continue
+                    if c.name == 'p' and is_blank_tag(c): continue
+                    return False
+            return True
+        return False
+    def flatten_nodes(parent):
+        for node in parent.children:
+            if isinstance(node, str):
+                if not node.strip(): continue
+                yield node
+            elif node.name in ['br', 'p', 'div']:
+                if node.name == 'div': yield from flatten_nodes(node)
+                else: yield node
+            else: yield node
+    def group_blanks(nodes):
+        groups, group = [], []
+        for node in nodes:
+            if isinstance(node, str):
+                if not node.strip(): continue
+                if group: groups.append(group); group = []
+                continue
+            if hasattr(node, 'name') and is_blank_tag(node): group.append(node)
+            else:
+                if group: groups.append(group); group = []
+        if group: groups.append(group)
+        return groups
+    
+    flat_nodes = list(flatten_nodes(soup.body if soup.body else soup))
+    blank_groups = group_blanks(flat_nodes)
+    # 先执行空行删除，再执行空行限制
+    if remove_blank != '-':
+        to_delete = int(remove_blank)
+        for group in blank_groups:
+            for t in group[:to_delete]: t.decompose()
+        blank_groups = group_blanks(list(flatten_nodes(soup.body if soup.body else soup)))
+    if limit_blank != '-':
+        limit = int(limit_blank)
+        for group in blank_groups:
+            for t in group[limit:]: t.decompose()
+
+def mp_normalize_xhtml_header(soup, lang_val, rel_css):
+    """xhtml规格化头部信息与CSS重建"""
+    html = soup.find('html') or soup.append(soup.new_tag('html')) or soup.find('html')
+    # 规格化 HTML 属性
+    html.attrs = {'xmlns': "http://www.w3.org/1999/xhtml", 'xmlns:epub': "http://www.idpf.org/2007/ops", 'xml:lang': lang_val}
+    # 重建 Head 信息
+    title_str = soup.title.string.strip() if soup.title and soup.title.string else ""
+    head = soup.head or html.insert(0, soup.new_tag('head')) or soup.head
+    head.clear()
+    for node in [NavigableString('\n'), soup.new_tag('title'), NavigableString('\n'), 
+                    soup.new_tag('link', rel='stylesheet', type='text/css', href=rel_css), NavigableString('\n')]:
+        if node.name == 'title': node.string = title_str
+        head.append(node)
+    if soup.body: [s.decompose() for s in soup.body.select('script')]
+
+def set_low_priority():
+    """调用psutil设置低优先度"""
+    try:
+        level = psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == 'nt' else 10
+        psutil.Process(os.getpid()).nice(level)
+    except Exception as e:
+        logger.warning(f"无法设置低优先级: {e}")
+
+def mp_process_single_file_pipeline(args):
+    """
+    多进程单文件核心流水线函数
+    完全独立于主进程的 GUI 和 TKinter。纯数据驱动。
+    可调整执行顺序
+    """
+    (xf_str, rel_css, lang_val, class_name, flags, regex_rules) = args
+    
+    try:
+        with open(xf_str, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # ==============================================================
+        # 1: 首次 BS4 解析 (修正头部、执行 Ruby 与傍点转换)
+        soup = BeautifulSoup(content, 'html.parser')
+        if flags.get('is_style'): mp_normalize_xhtml_header(soup, lang_val, rel_css)
+        if flags.get('is_process_ruby'): mp_process_ruby(soup)
+        if flags.get('is_modify_html'): mp_modify_html(soup, class_name)
+
+        content = mp_fmt(soup) # 将修整后的 HTML 转换回文本
+
+        # ==============================================================
+        # 2: 正则替换 如果正则破坏了结构(例如出现孤立的</span>)，将在步骤3被自动修复
+        if regex_rules:
+            for pattern, repl in regex_rules:
+                try:
+                    content = re.sub(pattern, repl, content)
+                except Exception:
+                    pass # 忽略编写错误的正则，防止整书崩溃
+
+        # ==============================================================
+        # 3: 二次BS4解析 (兜底纠错、处理图片交互与空行)
+        soup = BeautifulSoup(content, 'html.parser')
+
+        if flags.get('is_process_images'): mp_post_process_images(soup)
+        if flags.get('remove_blank') != '-' or flags.get('limit_blank') != '-':
+            mp_process_blank_lines(soup, flags.get('remove_blank'), flags.get('limit_blank'))
+
+        # 最终定型文本
+        content = mp_fmt(soup)
+
+        # ==============================================================
+        # 4: XML声明回补与保存
+        if flags.get('is_style') and not content.strip().startswith('<?xml'):
+            # 如果进行了头部规格化但缺失XML声明，则补全一个标准声明
+            content = f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n{content}'
+
+        Path(xf_str).write_text(content, 'utf-8')
+        return (True, xf_str, "")
+    except Exception as e:
+        return (False, xf_str, str(e))
+# ===================================================================== #
 
 class EpubProcessor:
     def __init__(self, root):
@@ -154,33 +394,29 @@ class EpubProcessor:
     def start_conversion(self):
         if not hasattr(self, 'epub_path'): return messagebox.showwarning('警告', '请先选择EPUB文件')
         if not (fn := filedialog.asksaveasfilename(defaultextension='.epub', filetypes=[('EPUB文件', '*.epub')])): return
-        logger.opt(exception=True).catch(lambda: self.process_epub(fn))()
+        # 单文件转换仍在后台线程中，防UI假死
+        threading.Thread(target=lambda: logger.opt(exception=True).catch(lambda: self.process_epub(fn))(), daemon=True).start()
 
     def batch_convert_epubs(self, epub_paths=None):
         if not (ps := epub_paths or filedialog.askopenfilenames(filetypes=[('EPUB文件', '*.epub')])): return
         out = Path(ps[0]).parent / 'output'; out.mkdir(exist_ok=True)
-        counts = {'ERROR': 0, 'WARNING': 0}
-        logger_id = logger.add(lambda r: counts.__setitem__(r.record["level"].name, counts[r.record["level"].name]+1) or None, level='WARNING')
-        for p in ps:
-            try:
-                self.epub_path = p
-                self.process_epub(str(out / Path(p).name))
-            except Exception:
-                logger.opt(exception=True).error(f"文件处理失败: {Path(p).name}")
-        logger.remove(logger_id)
-        logger.success(f"批量转换完成: 共{len(ps)}，ERROR:{counts['ERROR']}，WARNING:{counts['WARNING']}")
-
-    def _fmt(self, soup):
-        from bs4.formatter import HTMLFormatter, EntitySubstitution
-        sub_func = getattr(EntitySubstitution, 'substitute_xml', 
-                           getattr(EntitySubstitution, 'substitute_xml_entities', None))
-        return soup.decode(formatter=HTMLFormatter(entity_substitution=lambda s: 
-            sub_func(s).replace('\u00A0', '&#160;')))
+        def _batch_worker():
+            counts = {'ERROR': 0, 'WARNING': 0}
+            logger_id = logger.add(lambda r: counts.__setitem__(r.record["level"].name, counts[r.record["level"].name]+1) or None, level='WARNING')
+            for p in ps:
+                try:
+                    self.epub_path = p
+                    self.process_epub(str(out / Path(p).name))
+                except Exception:
+                    logger.opt(exception=True).error(f"文件处理失败: {Path(p).name}")
+            logger.remove(logger_id)
+            logger.success(f"批量转换完成: 共{len(ps)}，ERROR:{counts['ERROR']}，WARNING:{counts['WARNING']}")
+        # 启动后台线程执行批量循环，避免卡住 Tkinter 界面
+        threading.Thread(target=_batch_worker, daemon=True).start()
 
     def process_epub(self, output_filename):
-        """实际开始处理流程"""
+        """实际开始处理流程，分为结构处理、内容并发、打包三个阶段"""
         logger.info(f"开始处理epub文件: {self.epub_path}")
-        class_name = self.class_name_var.get()
 
         with tempfile.TemporaryDirectory(dir=self.sesame_root) as temp_dir:
             logger.info(f"解压临时目录: {temp_dir}")
@@ -190,11 +426,12 @@ class EpubProcessor:
             opf_full_path = self._get_opf_path(temp_dir)
             logger.debug(f"OPF文件路径: {opf_full_path}")
 
-            # 图片转换
+            # ================= Phase 1: 结构级操作 (单线程) ================= #
+            # 图片转换 调用外部程序处理图片
             if self.convert_images_var.get():
                 self.convert_epub_images(temp_dir)
 
-            # 删除自带样式并添加自定义样式表并更新opf跟页面引用 更改opf语言标识 跟原逻辑独立两个开关
+            # 清理OPF样式、添加CSS文件及更改语言标识[规格化头部信息与CSS重建移至多进程逻辑]
             self.process_opf_and_styles(temp_dir)
 
             opf_path = self._get_opf_path(temp_dir)
@@ -209,8 +446,7 @@ class EpubProcessor:
             # 转换epub版本并删除nav
             if self.convert_epub_version_enabled.get():
                 success, msg = EpubNCXGenerator.convert_to_epub2(opf_path)
-                if not success:
-                    logger.warning(f"版本转换警告: {msg}")
+                if not success: logger.warning(f"版本转换警告: {msg}")
 
             # 重新解析目录 正则匹配追加、分割章节
             opf_path = self._get_opf_path(temp_dir)
@@ -221,35 +457,62 @@ class EpubProcessor:
             if self.merge_xhtml_enabled.get():
                 self.merge_xhtml_files(temp_dir)
 
-            # 遍历所有文件并处理
-            for xf in Path(temp_dir).rglob("*"):
-                    if xf.suffix.lower() in ('.xhtml', '.html'):
-                        soup = BeautifulSoup(xf.read_text('u8'), 'html.parser')
-                        # ruby规格化 傍点转ruby
-                        if self.process_ruby_enabled.get(): self.process_ruby(soup)
-                        if self.modify_html_enabled.get(): self.modify_html(soup, class_name)
+            # ================= Phase 2: 单页内容级操作 (多进程逻辑) ================= #
 
-                        # 正则替换
-                        content = self.regex_manager.apply_rules(self._fmt(soup))
+            # 1. 抽取正则规则 (纯数据列表，规避 GUI 组件 pickling 问题)
+            regex_rules = []
+            try:
+                regex_rules = self.regex_manager.get_rules()
+            except Exception as e:
+                logger.warning(f"提取内存正则规则失败: {e}")
 
-                        # 图片标签处理
-                        if self.process_images_enabled.get():
-                            soup_img = BeautifulSoup(content, 'html.parser')
-                            self.post_process_images(soup_img)
-                            content = self._fmt(soup_img)
-                        xf.write_text(content, 'u8')
+            # 2. 抽取布尔开关和变量为纯字典
+            flags_dict = {
+                'is_lang': self.set_lang_enabled.get(),
+                'is_style': self.delete_style_enabled.get(),
+                'is_process_ruby': self.process_ruby_enabled.get(),
+                'is_modify_html': self.modify_html_enabled.get(),
+                'is_process_images': self.process_images_enabled.get(),
+                'remove_blank': self._settings_vars_dict['merge_remove_blank_lines_var'].get(),
+                'limit_blank': self._settings_vars_dict['merge_limit_blank_lines_var'].get()
+            }
+            lang_val = self.set_lang_var.get().strip() if flags_dict['is_lang'] else "ja"
+            class_name = self.class_name_var.get()
 
+            css_dir = opf_path.parent / 'css'
+            html_files = [str(xf) for xf in Path(temp_dir).rglob("*") if xf.suffix.lower() in ('.xhtml', '.html')]
+
+            # 3. 组装数据包裹
+            mp_args = []
+            for xf_str in html_files:
+                rel_css = os.path.relpath(css_dir / 'style.css', Path(xf_str).parent).replace('\\', '/')
+                mp_args.append((
+                    xf_str, rel_css, lang_val, class_name, flags_dict, regex_rules
+                ))
+
+            logger.info(f"启动多进程流水线处理 {len(html_files)} 个文件")
+
+            # 使用 ProcessPoolExecutor 来并行处理xhtml设置低优先级进程
+            with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count() or 4, initializer=set_low_priority) as executor:
+                for future in concurrent.futures.as_completed([executor.submit(mp_process_single_file_pipeline, arg) for arg in mp_args]):
+                    success, xf_str, err = future.result()
+                    if not success:
+                        logger.error(f"处理文件崩溃 [{Path(xf_str).name}]: {err}")
+
+            # 汇报日志输出
             [logger.info(msg) for var, msg in [
+                (self.delete_style_enabled, "xhtml头部信息规格化与css重建 √"),
                 (self.process_ruby_enabled, "Ruby标签规格化 √"),
                 (self.modify_html_enabled, "傍点转换ruby格式 √"),
                 (None, "正则替换 √"), 
                 (self.process_images_enabled, "图片标签规格化 √")
             ] if var is None or var.get()]
 
-            # 空行处理
-            self.process_blank_lines(temp_dir)
+            # 空行处理移至多线程逻辑 这里只显示个日志
+            if flags_dict['remove_blank'] != '-' or flags_dict['limit_blank'] != '-':
+                logger.info("空行数量限制清理 √")
 
-            # 重新打包 EPUB 文件
+            # ================= Phase 3: 收尾与重打包 ================= #
             with zipfile.ZipFile(output_filename, "w", zipfile.ZIP_DEFLATED) as zip_ref:
                 for root, dirs, files in os.walk(temp_dir):
                     for file in files:
@@ -259,6 +522,7 @@ class EpubProcessor:
             logger.info(f"EPUB文件处理完成，保存到: {output_filename}")
 
     def process_opf_and_styles(self, temp_dir):
+        """清理OPF样式、添加CSS文件及更改语言标识(XHTML处理已移交多进程)"""
         temp_dir, opf_path = Path(temp_dir), self._get_opf_path(Path(temp_dir))
         opf_soup = BeautifulSoup(opf_path.read_text('u8'), 'xml')
         # 获取开关状态
@@ -295,27 +559,6 @@ class EpubProcessor:
                     else: logger.debug("临时样式为空，未追加")
                     logger.success("添加style.css 完成")
                 except Exception as e: logger.error(f"获取临时样式失败: {e}")
-            # 3. XHTML 规格化头部信息与CSS重建
-            xhtml_count = 0
-            for xf in [f for f in temp_dir.rglob("*") if f.suffix.lower() in ('.xhtml', '.html')]:
-                soup = BeautifulSoup(xf.read_text('u8'), 'lxml-xml')
-                html = soup.find('html') or soup.append(soup.new_tag('html')) or soup.find('html')
-                # 规格化 HTML 属性
-                html.attrs = {'xmlns': "http://www.w3.org/1999/xhtml", 'xmlns:epub': "http://www.idpf.org/2007/ops", 'xml:lang': lang_val}
-                # 重建 Head 信息
-                title_str = soup.title.string.strip() if soup.title and soup.title.string else ""
-                head = soup.head or html.insert(0, soup.new_tag('head')) or soup.head
-                head.clear()
-                rel_css = os.path.relpath(css_dir / 'style.css', xf.parent).replace('\\', '/')
-                for node in [NavigableString('\n'), soup.new_tag('title'), NavigableString('\n'), 
-                             soup.new_tag('link', rel='stylesheet', type='text/css', href=rel_css), NavigableString('\n')]:
-                    if node.name == 'title': node.string = title_str
-                    head.append(node)
-                if soup.body: [s.decompose() for s in soup.body.select('script')]
-                # 写入带规格化头的源码
-                xf.write_text(f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n{html.decode(formatter="minimal")}', 'u8')
-                xhtml_count += 1
-            logger.info(f"已更新 {xhtml_count} 个Xhtml头部信息与样式链接")
         # 去除metadata下子标签文本首尾的换行跟空格
         if opf_soup.metadata: [setattr(t, 'string', t.string.strip()) for t in opf_soup.metadata.find_all() if t.string]
         if is_lang_enabled or is_style_enabled:
@@ -374,68 +617,6 @@ class EpubProcessor:
                     [tg.decompose() for tg in [*spine.find_all('itemref',idref=it.get('id')),it]]; modified=True
             m.write_text(str(ms),'utf-8')
         (opf_path.write_text(str(opf_soup),'utf-8'),logger.info("章节间Xhtml合并 完成")) if modified else logger.info("无需更新 OPF，无章节被合并")
-
-    def process_blank_lines(self, temp_dir):
-        """删除空行数量限制连续空行"""
-        remove_blank = self._settings_vars_dict['merge_remove_blank_lines_var'].get()
-        limit_blank = self._settings_vars_dict['merge_limit_blank_lines_var'].get()
-        if remove_blank == '-' and limit_blank == '-':
-            return
-        temp_dir = Path(temp_dir)
-        for file_path in temp_dir.rglob("*"):
-            if file_path.suffix.lower() not in ('.xhtml', '.html'):
-                continue
-            soup = BeautifulSoup(file_path.read_text(encoding='utf-8'), 'html.parser')
-            def is_blank_tag(tag):
-                if tag.name == 'br': return True
-                if tag.name == 'p':
-                    children = [c for c in tag.children if isinstance(c, (str, type(tag)))]
-                    if len(children) == 1 and getattr(children[0], 'name', None) == 'br': return True
-                    if not tag.get_text(strip=True) and all((getattr(c, 'name', None) == 'br' or (isinstance(c, str) and not c.strip())) for c in tag.contents): return True
-                    return False
-                if tag.name == 'div':
-                    for c in tag.contents:
-                        if isinstance(c, str) and c.strip(): return False
-                        if hasattr(c, 'name'):
-                            if c.name == 'br': continue
-                            if c.name == 'p' and is_blank_tag(c): continue
-                            return False
-                    return True
-                return False
-            def flatten_nodes(parent):
-                for node in parent.children:
-                    if isinstance(node, str):
-                        if not node.strip(): continue
-                        yield node
-                    elif node.name in ['br', 'p', 'div']:
-                        if node.name == 'div': yield from flatten_nodes(node)
-                        else: yield node
-                    else: yield node
-            def group_blanks(nodes):
-                groups, group = [], []
-                for node in nodes:
-                    if isinstance(node, str):
-                        if not node.strip(): continue
-                        if group: groups.append(group); group = []
-                        continue
-                    if hasattr(node, 'name') and is_blank_tag(node): group.append(node)
-                    else:
-                        if group: groups.append(group); group = []
-                if group: groups.append(group)
-                return groups
-            flat_nodes = list(flatten_nodes(soup.body if soup.body else soup))
-            blank_groups = group_blanks(flat_nodes)
-            # 先执行空行删除，再执行空行限制
-            if remove_blank != '-':
-                to_delete = int(remove_blank)
-                for group in blank_groups:
-                    for t in group[:to_delete]: t.decompose()
-                blank_groups = group_blanks(list(flatten_nodes(soup.body if soup.body else soup)))
-            if limit_blank != '-':
-                limit = int(limit_blank)
-                for group in blank_groups:
-                    for t in group[limit:]: t.decompose()
-            file_path.write_text(self._fmt(soup), encoding='utf-8')
 
     def _get_opf_path(self, temp_dir):
         """解析container.xml 准确获取opf名字路径"""
@@ -627,98 +808,6 @@ class EpubProcessor:
             traceback.print_exc()
         finally:
             logger.info("图片处理流程结束")
-
-    def process_ruby(self, soup):
-        # 合并连续的ruby标签
-        ruby_tags, i = soup.find_all('ruby'), 0
-        while i < len(ruby_tags) - 1:
-            c, n = ruby_tags[i], ruby_tags[i + 1]
-            # 检查两个ruby标签是否相邻
-            s = c.next_sibling
-            while s and (not getattr(s, 'name', None)) and not s.strip(): s = s.next_sibling
-            if s is n:
-                [c.append(x) for x in list(n.contents)]  # 合并两个ruby标签
-                n.decompose()
-                ruby_tags.pop(i + 1)  #  性能优化：更新本地列表
-            else: i += 1
-        for ruby_tag in ruby_tags:  # 遍历所有ruby标签
-            rt_tags = ruby_tag.find_all('rt')
-            if rt_tags and rt_tags[0].get_text(strip=True).startswith('・'):continue  # 跳过rt标签后以・开头则跳过的ruby
-            img_tags = ruby_tag.find_all('img')  # 查找ruby内所有img标签
-            merged_content = ''.join(t for t in [rt.get_text(strip=True) for rt in rt_tags] if t)  # 合并 <rt> 标签 忽略所有的嵌套标签
-            for rt in rt_tags: rt.extract()  # 删除残留的原rt标签
-            for rb in ruby_tag.find_all('rb'): rb.unwrap() # 删除全部rb标签
-            if img_tags:  # ruby内含图片的处理
-                for child in list(ruby_tag.contents):  # 遍历ruby内所有子节点
-                    if getattr(child, 'name', None) != 'rt':  # 除rt标签内容
-                        ruby_tag.insert_before(child.extract() if hasattr(child, 'extract') else child)  # 搬到ruby前面
-                new_ruby = soup.new_tag('ruby')  # 创建新ruby标签
-                new_ruby.string = '\u00A0'  # 空占位符 预防空标签不显示内容
-                rt = soup.new_tag('rt')  # 创建新rt标签
-                rt.string = merged_content if merged_content else '\u00A0'  # rt内容或空占位
-                new_ruby.append(rt)  # 添加rt到ruby
-                ruby_tag.replace_with(new_ruby)  # 用新ruby替换原ruby
-            else:  # 正常ruby标签处理
-                original_content = ruby_tag.get_text().replace('\n', '')  # 获取原内容并去除换行
-                new_ruby = soup.new_tag('ruby')  # 创建新ruby标签
-                new_ruby.string = original_content  # 设置ruby正文
-                rt = soup.new_tag('rt')  # 创建新rt标签
-                rt.string = merged_content  # 设置rt内容
-                new_ruby.append(rt)  # 添加rt到ruby
-                ruby_tag.replace_with(new_ruby)  # 用新ruby替换原ruby
-
-    def post_process_images(self, soup):
-        # 合并处理div和p标签处理逻辑 改成遍历所有img标签
-        # 删除img标签内style 如果没有alt则填充空白alt 排除span标签跟class=gaiji的标签
-        for img in soup.find_all('img'):
-            if 'gaiji' in img.get('class', []):
-                continue
-            parent = img.parent
-            if parent.name in ('div', 'p'):
-                if all(
-                    c == img or
-                    (getattr(c, 'name', None) == 'br') or
-                    (isinstance(c, str) and not c.strip())
-                    for c in parent.contents
-                ):
-                    img.attrs.pop('style', None)
-                    img['alt'] = img.get('alt', '')
-                    new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
-                    img.extract()
-                    new_div.append(img)
-                    parent.replace_with(new_div)
-
-        # 处理 svg 和 ops:switch
-        for tag in soup.find_all(['svg', 'ops:switch']):
-            if tag.name == 'svg' or (tag.name == 'ops:switch' and tag.find('svg')):
-                image_tag = tag.find('image')
-                if image_tag:
-                    href = image_tag.get('xlink:href') or image_tag.get('{http://www.w3.org/1999/xlink}href')
-                    if href:
-                        new_div = soup.new_tag('div', attrs={'class': 'illus duokan-image-single'})
-                        new_img = soup.new_tag('img', src=href, alt='')
-                        new_div.append(new_img)
-                        # 如果是 ops:switch 标签，直接替换整个标签
-                        if tag.name == 'ops:switch':
-                            tag.replace_with(new_div)
-                        else:  # 如果是 svg，替换 svg
-                            tag.replace_with(new_div)
-
-    def modify_html(self, soup, class_names):
-        classes = [c.strip() for c in class_names.split('|') if c.strip()]
-        for class_name in classes:
-            # 使用 soup.select 替代 re 匹配，更准确且快
-            for span in soup.select(f'span[class~="{class_name}"], em[class~="{class_name}"]'): 
-                # 获取纯文本，防止 span 内部有其他标签导致 .string 为空
-                text_content = span.get_text() 
-                if text_content:
-                    ruby = soup.new_tag('ruby')
-                    for char in text_content:
-                        ruby.append(soup.new_string(char))
-                        rt_tag = soup.new_tag('rt')
-                        rt_tag.append(soup.new_string("・"))
-                        ruby.append(rt_tag)
-                    span.replace_with(ruby)
 
     def show_exclude_dialog(self):
         """章节合并排除/正则追加分割章节 对话框"""
@@ -1030,6 +1119,7 @@ class WinSize:
         config['WinSize'] = self._states
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     logger.info("程序初始化")
     root = TkinterDnD.Tk()
     processor = EpubProcessor(root)
