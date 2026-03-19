@@ -25,6 +25,7 @@ jobs:
         pip install loguru
         pip install lxml
         pip install tkinterdnd2
+        pip install psutil
 
     - name: 编译EXE文件
       run: |
