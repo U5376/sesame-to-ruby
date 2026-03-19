@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -308,50 +309,94 @@ class ClassList:
                         if (idref := itemref.get("idref")) and idref in manifest}
             except: return {}
 
+        # 解析单个HTML文件的函数（子线程执行：纯计算，无UI操作）
+        def _parse_html_file(file_content_bytes, filename):
+            results = {'counts': {}, 'samples': {}, 'class_tags': []}
+            try:
+                # 处理xhtml 使用 XPath 仅提取带 class 的标签
+                root = lxml.html.fromstring(file_content_bytes)
+                for el in root.xpath('//*[@class]'):
+                    tag = el.tag.rsplit('}', 1)[-1].lower()
+                    cls_list = el.get('class').split()
+                    s_raw = ""
+                    # 性能优化：在子线程预先判断是否需要提取实例字符串
+                    if any(len(self.samples_data.get(c, [])) < 15 for c in cls_list):
+                        s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
+                    for c in cls_list:
+                        results['counts'][c] = results['counts'].get(c, 0) + 1
+                        results['class_tags'].append((c, tag))
+                        if s_raw and len(results['samples'].get(c, [])) < 15: # 每个class仅收集前15个实例，避免过度内存占用
+                            results['samples'].setdefault(c, []).append((filename, re.sub(r'\s+', ' ', s_raw)[:150]))
+            except: pass
+            return results
+
+        # 合并解析结果到主数据结构（主线程执行：包含UI更新）
+        def _merge_results(results):
+            for c, cnt in results['counts'].items():
+                self.counts_data[c] = self.counts_data.get(c, 0) + cnt
+                # 处理html提取的class数据 (保留原码判断逻辑与Treeview更新)
+                for tag in [t for cls, t in results['class_tags'] if cls == c]:
+                    [ (self.cats[k].add(c), key := (k, c),
+                       tree.item(class_to_iid[key], values=(self.counts_data[c],)) if key in class_to_iid else
+                       (class_to_iid.update({key: tree.insert(nodes[k], "end", text=c, values=(self.counts_data[c],))}),
+                        self.all_items_refs.append((k, c, class_to_iid[key])),
+                        # 字母顺序重排
+                        ch := sorted(tree.get_children(nodes[k]), key=lambda x: tree.item(x, 'text').lower()),
+                        [tree.move(child, nodes[k], idx) for idx, child in enumerate(ch)]))
+                      for k, v in [('Class列表', 1), ('Span列表', tag=='span'), ('图片Class列表', tag=='img'), 
+                                   ('非P标签列表', tag!='p'), ('非P、img、body标签列表', tag not in ['p','img','body'])] if v ]
+                    break # 每个class在一次结果合并中只更新一次分类树
+            for c, s_list in results['samples'].items():
+                if len(self.samples_data.get(c, [])) < 15: # 仅在样本不足时合并，避免过度覆盖
+                    self.samples_data.setdefault(c, []).extend(s_list[:15 - len(self.samples_data.get(c, []))])
+
         # 构建epub文件树 提取样式和实例数据
         def parse_gen():
             with zipfile.ZipFile(self.epub_path, 'r') as z:
-                spine= get_opf_spine_order(z)
+                spine = get_opf_spine_order(z)
                 def sort_key(p):
                     low = p.lower()
                     # 语义权重：HTML(0) > CSS(1) > ncx/opf/xml(2) > 其他(3)
                     w = 0 if low.endswith(('.html', '.xhtml')) else 1 if low.endswith('.css') else 2 if low.endswith(('.ncx', '.opf', '.xml')) else 3
                     return (not p.endswith('/'), w, (0, spine.get(p, 0)) if w == 0 else (1, low))
                 nl = sorted(z.namelist(), key=sort_key)
+                # 构建文件树
                 [ (parts := p.split('/'), [ (cur := "/".join(parts[:i+1]), pre := "/".join(parts[:i]), 
                    cur not in self.n_map and self.n_map.update({cur: ftree.insert(self.n_map[pre], "end", text=cur, 
                    tags=(cur if (i==len(parts)-1 and not p.endswith('/')) else cur+"/",))}),
                    (i < len(parts)-1) and ftree.item(self.n_map[cur], open=True) # 直接赋值True 列表全部展开
                   ) for i in range(len(parts) - (1 if p.endswith('/') else 0))]) for p in nl ]
                 yield
-                for f in nl:
+
+                css_files = [f for f in nl if f.endswith('.css')]
+                html_files = [f for f in nl if f.endswith(('.html', '.xhtml'))]
+                # 提取css样式
+                for f in css_files:
                     if not self._running: return
-                    # 提取css样式
-                    if f.endswith('.css'):
-                        b_txt = z.read(f).decode('utf-8', 'ignore')
-                        [[self.style_data.setdefault(c, {}).setdefault(f, []).append({'selector': p, 'content': re.sub(r';\s*', ';\n  ', b.strip())})
-                          for p in [s.strip() for s in sel.split(',')]
-                          for m in re.findall(r'(?:\.([\w-]+))|(?:\b([a-zA-Z1-6]+)\b)', p)
-                          for c in m if c] for sel, b in re.findall(r'([^{]+)\{([^}]+)\}', re.sub(r'/\*.*?\*/', '', b_txt, flags=re.DOTALL))]
-                    # 处理xhtml 使用 XPath 仅提取带 class 的标签
-                    elif f.endswith(('.html', '.xhtml')):
-                        for el in lxml.html.fromstring(z.read(f)).xpath('//*[@class]'):
-                            tag, cls_list = el.tag.rsplit('}', 1)[-1].lower(), el.get('class').split()
-                            for c in cls_list:
-                                self.counts_data[c] = self.counts_data.get(c, 0) + 1
-                                [ (self.cats[k].add(c), key := (k, c),
-                                   tree.item(class_to_iid[key], values=(self.counts_data[c],)) if key in class_to_iid else
-                                   (class_to_iid.update({key: tree.insert(nodes[k], "end", text=c, values=(self.counts_data[c],))}),
-                                    self.all_items_refs.append((k, c, class_to_iid[key])),
-                                    # 字母顺序重排
-                                    ch := sorted(tree.get_children(nodes[k]), key=lambda x: tree.item(x, 'text').lower()),
-                                    [tree.move(child, nodes[k], idx) for idx, child in enumerate(ch)]))
-                                  for k, v in [('Class列表', 1), ('Span列表', tag=='span'), ('图片Class列表', tag=='img'), 
-                                               ('非P标签列表', tag!='p'), ('非P、img、body标签列表', tag not in ['p','img','body'])] if v ]
-                                if len(self.samples_data.get(c, [])) < 15: # 提取15个实例
-                                    s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
-                                    self.samples_data.setdefault(c, []).append((f, re.sub(r'\s+', ' ', s_raw)[:150]))
-                        yield
+                    b_txt = z.read(f).decode('utf-8', 'ignore')
+                    [[self.style_data.setdefault(c, {}).setdefault(f, []).append({'selector': p, 'content': re.sub(r';\s*', ';\n  ', b.strip())})
+                      for p in [s.strip() for s in sel.split(',')]
+                      for m in re.findall(r'(?:\.([\w-]+))|(?:\b([a-zA-Z1-6]+)\b)', p)
+                      for c in m if c] for sel, b in re.findall(r'([^{]+)\{([^}]+)\}', re.sub(r'/\*.*?\*/', '', b_txt, flags=re.DOTALL))]
+                    yield
+
+                # 多线程批量处理html
+                max_workers, batch_size = min(os.cpu_count() or 2, 6), 12 # 限制最大6线程12文件一批 防止过度线程切换和内存占用
+                for i in range(0, len(html_files), batch_size):
+                    if not self._running: return
+                    batch = html_files[i : i + batch_size]
+                    # 主线程预读字节流，规避ZipFile线程锁
+                    batch_tasks = []
+                    for f in batch:
+                        try: batch_tasks.append((z.read(f), f))
+                        except: pass
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        # 子线程仅负责计算密集型的解析任务
+                        fs = {executor.submit(_parse_html_file, data, name): name for data, name in batch_tasks}
+                        for future in as_completed(fs):
+                            res = future.result()
+                            if res: _merge_results(res) # 回主线程合并数据并更新UI
+                    yield # 每批次完成后交还UI控制权
         gen = parse_gen()
         def run_step(): # 递归调用生成器分步处理
             if self._running:
