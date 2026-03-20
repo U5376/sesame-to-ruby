@@ -499,14 +499,15 @@ class EpubProcessor:
                     if not success:
                         logger.error(f"处理文件崩溃 [{Path(xf_str).name}]: {err}")
 
-            # 汇报日志输出
-            [logger.info(msg) for var, msg in [
-                (self.delete_style_enabled, "xhtml头部信息规格化与css重建 √"),
-                (self.process_ruby_enabled, "Ruby标签规格化 √"),
-                (self.modify_html_enabled, "傍点转换ruby格式 √"),
-                (None, "正则替换 √"), 
-                (self.process_images_enabled, "图片标签规格化 √")
-            ] if var is None or var.get()]
+            # 汇报日志输出 使用flags_dict和regex_rules 避免重复调用get
+            f = flags_dict.get
+            [logger.info(msg) for cond, msg in [
+                (f('is_style'), "xhtml头部信息规格化与css重建 √"),
+                (f('is_process_ruby'), "Ruby标签规格化 √"),
+                (f('is_modify_html'), "傍点转换ruby格式 √"),
+                (regex_rules, "正则替换 √"),
+                (f('is_process_images'), "图片标签规格化 √")
+            ] if cond]
 
             # 空行处理移至多线程逻辑 这里只显示个日志
             if flags_dict['remove_blank'] != '-' or flags_dict['limit_blank'] != '-':
