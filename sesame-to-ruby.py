@@ -492,8 +492,8 @@ class EpubProcessor:
 
             logger.info(f"启动多进程流水线处理 {len(html_files)} 个文件")
 
-            # 使用 ProcessPoolExecutor 来并行处理xhtml设置低优先级进程
-            with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count() or 4, initializer=set_low_priority) as executor:
+            # 使用ProcessPoolExecutor低优先级进程并行处理xhtml 限制最大进程数为8 防止内存占用过高
+            with concurrent.futures.ProcessPoolExecutor(max_workers=min(os.cpu_count() or 4, 8), initializer=set_low_priority) as executor:
                 for future in concurrent.futures.as_completed([executor.submit(mp_process_single_file_pipeline, arg) for arg in mp_args]):
                     success, xf_str, err = future.result()
                     if not success:
