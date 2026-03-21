@@ -380,23 +380,25 @@ class ClassList:
                       for c in m if c] for sel, b in re.findall(r'([^{]+)\{([^}]+)\}', re.sub(r'/\*.*?\*/', '', b_txt, flags=re.DOTALL))]
                     yield
 
-                # 多线程批量处理html
-                max_workers, batch_size = min(os.cpu_count() or 2, 6), 12 # 限制最大6线程12文件一批 防止过度线程切换和内存占用
-                for i in range(0, len(html_files), batch_size):
-                    if not self._running: return
-                    batch = html_files[i : i + batch_size]
-                    # 主线程预读字节流，规避ZipFile线程锁
-                    batch_tasks = []
-                    for f in batch:
-                        try: batch_tasks.append((z.read(f), f))
-                        except: pass
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        # 子线程仅负责计算密集型的解析任务
-                        fs = {executor.submit(_parse_html_file, data, name): name for data, name in batch_tasks}
-                        for future in as_completed(fs):
-                            res = future.result()
-                            if res: _merge_results(res) # 回主线程合并数据并更新UI
-                    yield # 每批次完成后交还UI控制权
+                # 多线程动态分发处理html
+                max_workers = max(2, min(os.cpu_count() or 2, 8))  # 限制最大8线程 防止过度线程切换和内存占用
+                all_tasks = [] # 主线程预读字节流 规避ZipFile线程锁.准备动态分发
+                for f in html_files:
+                    try: all_tasks.append((z.read(f), f))
+                    except: pass
+                # 按线程动态分发任务.子线程仅负责解析 按文件独立提交.主线程负责结果合并和UI更新
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    fs = {executor.submit(_parse_html_file, data, name): name for data, name in all_tasks}
+                    count = 0
+                    for future in as_completed(fs):
+                        if not self._running: break
+                        res = future.result()
+                        if res: _merge_results(res) # 回主线程合并数据并更新UI
+                        # 10%的任务完成率刷新一次UI，保持界面响应性
+                        count += 1
+                        if count % 10 == 0:
+                            yield
+                yield # 每批次完成后交还UI控制权
         gen = parse_gen()
         def run_step(): # 递归调用生成器分步处理
             if self._running:
