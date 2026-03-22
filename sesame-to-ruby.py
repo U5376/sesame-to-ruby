@@ -309,7 +309,7 @@ class EpubProcessor:
         self._settings_vars_dict = {}  # 自动收集所有设置变量
         MAX_SHOW = 8  
         self.CFG = [
-            ('modify_html_enabled', '傍点转ruby', '需要检查class', [('class_name_var', 'em-sesame|em-dot|kenten', tk.Entry, {'w': 25}, '一般class名:\nem-sesame|em-dot|kenten')]),
+            ('modify_html_enabled', '傍点转ruby', '需要检查class', [('class_name_var', 'em-sesame|em-dot|kenten', tk.Entry, {'w': 25, 'sticky': 'ew'}, '一般class名:\nem-sesame|em-dot|kenten')]),
             ('process_ruby_enabled', 'Ruby格式规格化', '格式奇怪跟包含gaiji图片的标签规格化兼容处理', []),
             ('process_images_enabled', '图片标签多看交互规格化', '将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji', []),
             ('merge_xhtml_enabled', 'Xhtml章节间合并', '根据目录合并章节间文件', [
@@ -326,7 +326,9 @@ class EpubProcessor:
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
                  ('-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n'
                   '-s 锐化 默认1.0不处理\n-A 保留透明通道Alpha\n-w 线程数\n-m WebP压缩等级 1-6'))]),
-            ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN')]),
+            ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [
+                ('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN'),
+                ('max_workers_var', 'Auto', ttk.Combobox, {'w': 4, 'px': (110,0), 'val': ['Auto']+[str(i) for i in range(1, 33)]}, '多线程/进程并发数\nAuto限制最高为8')]),
         ]
         # 1.变量初始化
         for k, _, _, ex in self.CFG:
@@ -492,8 +494,10 @@ class EpubProcessor:
 
             logger.info(f"启动多进程流水线处理 {len(html_files)} 个文件")
 
-            # 使用ProcessPoolExecutor低优先级进程并行处理xhtml 限制最大进程数为8 防止内存占用过高
-            with concurrent.futures.ProcessPoolExecutor(max_workers=min(os.cpu_count() or 4, 8), initializer=set_low_priority) as executor:
+            # 读取UI配置，Auto则计算2-8动态核心数，否则使用指定数值
+            wk = int(uw) if (uw := self._settings_vars_dict['max_workers_var'].get()) != 'Auto' else max(2, min(os.cpu_count() or 2, 8))
+            # 使用ProcessPoolExecutor低优先级进程并行处理xhtml 限制自动最大进程数为8 防止内存占用过高
+            with concurrent.futures.ProcessPoolExecutor(max_workers=wk, initializer=set_low_priority) as executor:
                 for future in concurrent.futures.as_completed([executor.submit(mp_process_single_file_pipeline, arg) for arg in mp_args]):
                     success, xf_str, err = future.result()
                     if not success:
@@ -1031,6 +1035,7 @@ class EpubProcessor:
                   lambda: self.temp_style_content, 
                   lambda v: setattr(self, 'temp_style_content', v), 
                   lambda v: setattr(self, 'temp_style_content', self.temp_style_content + v),
+                  self._settings_vars_dict['max_workers_var'].get(),
                   self.win_size)
 
     def save_app_settings(self, return_config=False):
@@ -1076,6 +1081,7 @@ class EpubProcessor:
             'hr+br' if name == 'merge_separator_var' else
             '-' if name == 'merge_remove_blank_lines_var' else
             '3' if name == 'merge_limit_blank_lines_var' else
+            'Auto' if name == 'max_workers_var' else
             '')
         for name, var in self._settings_vars_dict.items()]
         # 同步重置正则规则

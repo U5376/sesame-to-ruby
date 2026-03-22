@@ -15,9 +15,10 @@ from loguru import logger
 from tkinterdnd2 import DND_FILES
 
 class ClassList:
-    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, win_size=None):
+    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, workers_cfg='Auto', win_size=None):
         self.root, self.epub_path = root, epub_path
         self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
+        self.workers_cfg = workers_cfg
         self.win_size = win_size
         self.style_data, self.samples_data, self.counts_data = {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
@@ -381,7 +382,7 @@ class ClassList:
                     yield
 
                 # 多线程动态分发处理html
-                max_workers = max(2, min(os.cpu_count() or 2, 8))  # 限制最大8线程 防止过度线程切换和内存占用
+                max_workers = int(w) if (w := self.workers_cfg) != 'Auto' else max(2, min(os.cpu_count() or 2, 8)) # 读取配置 自动(最低2最高8)或手动的线程数
                 all_tasks = [] # 主线程预读字节流 规避ZipFile线程锁.准备动态分发
                 for f in html_files:
                     try: all_tasks.append((z.read(f), f))
