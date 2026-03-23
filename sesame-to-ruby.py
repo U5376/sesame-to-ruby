@@ -326,10 +326,10 @@ class EpubProcessor:
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
                  ('-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n'
                   '-s 锐化 默认1.0不处理\n-A 保留透明通道Alpha\n-w 线程数\n-m WebP压缩等级 1-6'))]),
-            ('auto_override_enabled', '旋转图片', '出现次数达标的图片，追加覆盖成新的转换参数\n', [
+            ('auto_override_enabled', '旋转图片', '用于 飾り罫線 自动旋转\n超过阈值追加覆盖成新的转换参数', [
                 ('override_count_var', '10', tk.Entry, {'w': 3}, '触发追加参数的最低出现次数阈值'),
-                ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (5,0), 'sticky': 'ew'}, 
-                 '追加覆盖的参数\n-r-90 [旋转方向(+90, -90, 180)默认0不旋转]\n-R1:2 [触发旋转的比例(1.5, 128x1366, 1:2)，为空则不限制]')]),
+                ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (4,0), 'sticky': 'ew'}, 
+                 '追加覆盖的参数\n-r-90 [旋转方向(+90,-90,180,270)默认0不旋转]\n-R1:2 [触发旋转的比例(1.5, 128x1366, 1:2)，为空则不限制]')]),
             ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [
                 ('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN'),
                 ('max_workers_var', 'Auto', ttk.Combobox, {'w': 4, 'px': (110,0), 'val': ['Auto']+[str(i) for i in range(1, 33)]}, '多线程/进程并发数\nAuto限制最高为8')]),
@@ -672,14 +672,17 @@ class EpubProcessor:
             logger.debug("初始化图片转换配置")
             media_map = {'webp':'image/webp', 'png':'image/png', 
                         'jpg':'image/jpeg', 'jpeg':'image/jpeg'}
-            # 从参数解析输出格式
-            output_format = 'webp'
+            # 从参数解析主输出格式
             params = self.image_params_var.get().split()
-            if '-f' in params:
-                try:
-                    output_format = params[params.index('-f') + 1].lower()
-                except (IndexError, ValueError):
-                    logger.warning("参数解析失败，使用默认格式webp")
+            output_format = next((params[i+1].lower() for i, p in enumerate(params) if p == '-f' and i+1 < len(params)), 
+                                 next((p[2:].lower() for p in params if p.startswith('-f') and len(p)>2), 'webp'))
+            
+            # 提取追加参数及追加覆盖格式
+            override_str = self.override_param_var.get().strip() if hasattr(self, 'override_param_var') else ""
+            override_params = override_str.split()
+            override_format = next((override_params[i+1].lower() for i, p in enumerate(override_params) if p == '-f' and i+1 < len(override_params)), 
+                                   next((p[2:].lower() for p in override_params if p.startswith('-f') and len(p)>2), output_format))
+
             # ===== 2. 收集原始图片文件 =====
             original_images = []
             temp_dir_path = Path(temp_dir)
@@ -716,7 +719,7 @@ class EpubProcessor:
                     for img_path_str, count in img_counts.items():
                         if count >= threshold:
                             high_freq_images.add(img_path_str)
-                            logger.info(f"[独立参数候选] {Path(img_path_str).name} 出现 {count} 次，将追加独立参数")
+                            logger.info(f"[追加参数候选] {Path(img_path_str).name} 出现 {count} 次 将追加独立参数")
                 except Exception as e:
                     logger.error(f"统计图片时出错: {e}")
 
@@ -724,7 +727,10 @@ class EpubProcessor:
             image_mapping = {}
             for old_path in original_images:
                 old_file = Path(old_path)
-                new_name = f"{old_file.stem}.{output_format}"
+                # 单独判断是否应用了覆盖参数，从而赋予正确的后缀
+                is_override = old_path in high_freq_images and override_str
+                fmt = override_format if is_override else output_format
+                new_name = f"{old_file.stem}.{fmt}"
                 image_mapping[old_file.name] = new_name
                 logger.debug(f"[映射] {old_file.name} → {new_name}")
             # ===== 5. 执行图片转换 (单次调用 传递追加覆盖参数) =====
@@ -732,8 +738,6 @@ class EpubProcessor:
             converter_path = base_dir / "image_converter.exe"
             if not converter_path.exists():
                 raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
-            # 提取追加参数
-            override_str = self.override_param_var.get().strip() if hasattr(self, 'override_param_var') else ""
             # 构建带标记的列表，格式：绝对路径|覆盖参数
             list_lines = []
             for p in original_images:
@@ -748,7 +752,7 @@ class EpubProcessor:
             # 这里是正常的基准参数传入
             cmd = [str(converter_path), "-i", f"@{list_path}"] + params
             try:
-                logger.info(f"发送 {len(original_images)}个 (包含 {len(high_freq_images)} 个附带独立参数)")
+                logger.info(f"发送图片量:{len(original_images)} ({len(high_freq_images)}张 追加参数)")
                 logger.debug("[转换] 执行命令: " + ' '.join(cmd))
                 result = subprocess.run(cmd, cwd=temp_dir, capture_output=True, check=True, encoding='utf-8', errors='replace')
                 out = result.stdout or ""
@@ -763,12 +767,14 @@ class EpubProcessor:
             finally:
                 os.remove(list_path)
                 logger.debug(f"[清理] 已删除临时文件: {list_path}")
-            # ===== 5. 清理旧图片文件 =====
+            # ===== 6. 清理旧图片文件 =====
             deleted_files = 0
             for old_path in original_images:
                 old_file = Path(old_path)
                 old_ext = old_file.suffix.lower()[1:]
-                if old_ext == output_format:
+                # 核心修复：通过 image_mapping 拿真实的目标后缀
+                target_ext = Path(image_mapping[old_file.name]).suffix.lower()[1:] 
+                if old_ext == target_ext:
                     logger.debug(f"[跳过] 格式相同不清理: {old_file.relative_to(temp_dir_path)}")
                     continue
                 new_path = old_file.with_name(image_mapping[old_file.name])
@@ -782,7 +788,7 @@ class EpubProcessor:
                 else:
                     logger.error(f"[错误] 新文件未生成: {str(new_path.relative_to(temp_dir_path))}")
             logger.info(f"共清理 {deleted_files}/{len(original_images)} 个旧图片文件")
-            # ===== 6. 更新html内图片引用 =====
+            # ===== 7. 更新html内图片引用 =====
             updated_refs = 0
             for file in temp_dir_path.rglob('*'):
                 if file.suffix.lower() not in ('.xhtml', '.html'):
@@ -805,7 +811,7 @@ class EpubProcessor:
                 except Exception as e:
                     logger.error(f"[错误] 处理文件失败 {file}: {str(e)}")
             logger.info(f"共更新 {updated_refs} 个图片路径引用")
-            # ===== 7. 强制更新OPF媒体类型 =====
+            # ===== 8. 强制更新OPF媒体类型 =====
             logger.info("更新图片OPF清单")
             try:
                 # 定位OPF文件
@@ -827,18 +833,18 @@ class EpubProcessor:
                         # 检查是否为图片项
                         if ext not in media_map:
                             continue
-                        target_ext = output_format
                         changes = []
                         if file_name in image_mapping:
                             new_name = image_mapping[file_name]
+                            target_ext = Path(new_name).suffix[1:].lower() # 核心修复：拿真实转化后的后缀去匹配 media_map
                             item['href'] = href.replace(file_name, new_name)
                             changes.append(f"路径: {file_name} → {new_name}")
-                        new_type = media_map[target_ext]
-                        if item.get('media-type') != new_type:
-                            old_type = item.get('media-type', '未知')
-                            item['media-type'] = new_type
-                            changes.append(f"类型: {old_type} → {new_type}")
-                            modified = True
+                            new_type = media_map[target_ext]
+                            if item.get('media-type') != new_type:
+                                old_type = item.get('media-type', '未知')
+                                item['media-type'] = new_type
+                                changes.append(f"类型: {old_type} → {new_type}")
+                                modified = True
                         if changes:
                             logger.debug(f"[OPF] 更新: {' | '.join(changes)}")
                     if modified:
