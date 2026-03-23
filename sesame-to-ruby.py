@@ -326,6 +326,10 @@ class EpubProcessor:
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
                  ('-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n'
                   '-s 锐化 默认1.0不处理\n-A 保留透明通道Alpha\n-w 线程数\n-m WebP压缩等级 1-6'))]),
+            ('auto_override_enabled', '旋转图片', '出现次数达标的图片，追加覆盖成新的转换参数\n', [
+                ('override_count_var', '10', tk.Entry, {'w': 3}, '触发追加参数的最低出现次数阈值'),
+                ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (5,0), 'sticky': 'ew'}, 
+                 '追加覆盖的参数\n-r-90 [旋转方向(+90, -90, 180)默认0不旋转]\n-R1:2 [触发旋转的比例(1.5, 128x1366, 1:2)，为空则不限制]')]),
             ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [
                 ('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN'),
                 ('max_workers_var', 'Auto', ttk.Combobox, {'w': 4, 'px': (110,0), 'val': ['Auto']+[str(i) for i in range(1, 33)]}, '多线程/进程并发数\nAuto限制最高为8')]),
@@ -687,24 +691,64 @@ class EpubProcessor:
             if not original_images:
                 logger.warning("未找到需要转换的图片，跳过此流程")
                 return
-            # ===== 3. 生成文件名映射 =====
+            # ===== 3.分析统计图片使用次数=====
+            high_freq_images = set()
+            if hasattr(self, 'auto_override_enabled') and self.auto_override_enabled.get():
+                try:
+                    threshold = int(self.override_count_var.get())
+                    img_counts = {}
+                    
+                    for html_file in temp_dir_path.rglob('*'):
+                        # 只处理 .xhtml/.html 文件，且排除 nav.xhtml
+                        if not html_file.is_file(): continue
+                        if html_file.suffix.lower() not in ('.xhtml', '.html'): continue
+                        if html_file.name.lower() == 'nav.xhtml': continue
+                        soup = BeautifulSoup(html_file.read_text('utf-8', 'ignore'), 'html.parser')
+                        for img in soup.find_all('img'):
+                            if 'gaiji' in img.get('class', []): continue
+                            if not (src := img.get('src')): continue
+                            
+                            abs_src = (html_file.parent / unquote(src)).resolve()
+                            if abs_src.exists():
+                                path_str = str(abs_src)
+                                img_counts[path_str] = img_counts.get(path_str, 0) + 1
+                                
+                    for img_path_str, count in img_counts.items():
+                        if count >= threshold:
+                            high_freq_images.add(img_path_str)
+                            logger.info(f"[独立参数候选] {Path(img_path_str).name} 出现 {count} 次，将追加独立参数")
+                except Exception as e:
+                    logger.error(f"统计图片时出错: {e}")
+
+            # ===== 4. 生成文件名映射 =====
             image_mapping = {}
             for old_path in original_images:
                 old_file = Path(old_path)
                 new_name = f"{old_file.stem}.{output_format}"
                 image_mapping[old_file.name] = new_name
                 logger.debug(f"[映射] {old_file.name} → {new_name}")
-            # ===== 4. 执行图片转换 =====
+            # ===== 5. 执行图片转换 (单次调用 传递追加覆盖参数) =====
             base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
             converter_path = base_dir / "image_converter.exe"
             if not converter_path.exists():
                 raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
+            # 提取追加参数
+            override_str = self.override_param_var.get().strip() if hasattr(self, 'override_param_var') else ""
+            # 构建带标记的列表，格式：绝对路径|覆盖参数
+            list_lines = []
+            for p in original_images:
+                if p in high_freq_images and override_str:
+                    list_lines.append(f"{p}|{override_str}")
+                else:
+                    list_lines.append(p)
             with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8', dir=self.sesame_root) as list_file:
-                list_file.write('\n'.join(original_images))
+                list_file.write('\n'.join(list_lines))
                 list_path = list_file.name
             logger.debug(f"[转换] 生成临时列表文件: {list_path}")
-            cmd = [str(converter_path), "-i", f"@{list_path}", *params]
+            # 这里是正常的基准参数传入
+            cmd = [str(converter_path), "-i", f"@{list_path}"] + params
             try:
+                logger.info(f"发送 {len(original_images)}个 (包含 {len(high_freq_images)} 个附带独立参数)")
                 logger.debug("[转换] 执行命令: " + ' '.join(cmd))
                 result = subprocess.run(cmd, cwd=temp_dir, capture_output=True, check=True, encoding='utf-8', errors='replace')
                 out = result.stdout or ""
