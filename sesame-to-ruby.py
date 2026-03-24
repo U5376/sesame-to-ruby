@@ -670,100 +670,65 @@ class EpubProcessor:
         try:
             # ===== 1. 配置初始化 =====
             logger.debug("初始化图片转换配置")
-            media_map = {'webp':'image/webp', 'png':'image/png', 
-                        'jpg':'image/jpeg', 'jpeg':'image/jpeg'}
+            media_map = {'webp':'image/webp', 'png':'image/png', 'jpg':'image/jpeg', 'jpeg':'image/jpeg'}
             # 从参数解析主输出格式
+            _get_fmt = lambda ps, dlt: next((ps[i+1].lower() for i, p in enumerate(ps) if p == '-f' and i+1 < len(ps)), 
+                                            next((p[2:].lower() for p in ps if p.startswith('-f') and len(p)>2), dlt))
             params = self.image_params_var.get().split()
-            output_format = next((params[i+1].lower() for i, p in enumerate(params) if p == '-f' and i+1 < len(params)), 
-                                 next((p[2:].lower() for p in params if p.startswith('-f') and len(p)>2), 'webp'))
-            
+            output_format = _get_fmt(params, 'webp')
             # 提取追加参数及追加覆盖格式
             override_str = self.override_param_var.get().strip() if hasattr(self, 'override_param_var') else ""
             override_params = override_str.split()
-            override_format = next((override_params[i+1].lower() for i, p in enumerate(override_params) if p == '-f' and i+1 < len(override_params)), 
-                                   next((p[2:].lower() for p in override_params if p.startswith('-f') and len(p)>2), output_format))
-
+            override_format = _get_fmt(override_params, output_format)
             # ===== 2. 收集原始图片文件 =====
-            original_images = []
-            temp_dir_path = Path(temp_dir)
+            original_images, temp_dir_path = [], Path(temp_dir)
             for file in temp_dir_path.rglob('*'):
-                if file.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp'):
-                    if file.exists():  # 二次验证文件存在
-                        original_images.append(str(file))
-                        logger.debug(f"[扫描] 发现图片文件: {file.relative_to(temp_dir_path)}")
-            if not original_images:
-                logger.warning("未找到需要转换的图片，跳过此流程")
-                return
+                if file.is_file() and file.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp') and file.exists(): # 二次验证文件存在
+                    original_images.append(str(file))
+                    logger.debug(f"[扫描] 发现图片文件: {file.relative_to(temp_dir_path)}")
+            if not original_images: return logger.warning("未找到需要转换的图片，跳过此流程")
             # ===== 3.分析统计图片使用次数=====
             high_freq_images = set()
             if hasattr(self, 'auto_override_enabled') and self.auto_override_enabled.get():
                 try:
-                    threshold = int(self.override_count_var.get())
-                    img_counts = {}
-                    
-                    for html_file in temp_dir_path.rglob('*'):
-                        # 只处理 .xhtml/.html 文件，且排除 nav.xhtml
-                        if not html_file.is_file(): continue
-                        if html_file.suffix.lower() not in ('.xhtml', '.html'): continue
-                        if html_file.name.lower() == 'nav.xhtml': continue
+                    threshold, img_counts = int(self.override_count_var.get()), {}
+                    # 只处理 .xhtml/.html 文件，且排除 nav.xhtml跟包含gaiji图片的标签
+                    for html_file in [f for f in temp_dir_path.rglob('*') if f.suffix.lower() in ('.xhtml', '.html') and f.name.lower() != 'nav.xhtml']:
                         soup = BeautifulSoup(html_file.read_text('utf-8', 'ignore'), 'html.parser')
-                        for img in soup.find_all('img'):
-                            if 'gaiji' in img.get('class', []): continue
-                            if not (src := img.get('src')): continue
-                            
-                            abs_src = (html_file.parent / unquote(src)).resolve()
-                            if abs_src.exists():
-                                path_str = str(abs_src)
-                                img_counts[path_str] = img_counts.get(path_str, 0) + 1
-                                
-                    for img_path_str, count in img_counts.items():
-                        if count >= threshold:
-                            high_freq_images.add(img_path_str)
-                            logger.info(f"[追加参数候选] {Path(img_path_str).name} 出现 {count} 次 将追加独立参数")
-                except Exception as e:
-                    logger.error(f"统计图片时出错: {e}")
-
+                        for img in [i for i in soup.find_all('img') if 'gaiji' not in i.get('class', [])]:
+                            if (src := img.get('src')) and (abs_src := (html_file.parent / unquote(src)).resolve()).exists():
+                                img_counts[str(abs_src)] = img_counts.get(str(abs_src), 0) + 1
+                    high_freq_images = {p for p, c in img_counts.items() if c >= threshold}
+                    for p in high_freq_images:
+                        logger.info(f"[追加参数候选] {Path(p).name} 出现{img_counts[p]}次 将追加独立参数")
+                except Exception as e: logger.error(f"统计图片时出错: {e}")
             # ===== 4. 生成文件名映射 =====
-            image_mapping = {}
-            for old_path in original_images:
-                old_file = Path(old_path)
-                # 单独判断是否应用了覆盖参数，从而赋予正确的后缀
-                is_override = old_path in high_freq_images and override_str
-                fmt = override_format if is_override else output_format
-                new_name = f"{old_file.stem}.{fmt}"
-                image_mapping[old_file.name] = new_name
-                logger.debug(f"[映射] {old_file.name} → {new_name}")
+            # 判断是否应用了覆盖参数，从而赋予正确的后缀
+            image_mapping = {Path(p).name: f"{Path(p).stem}.{override_format if (p in high_freq_images and override_str) else output_format}" for p in original_images}
+            for old_name, new_name in image_mapping.items():
+                logger.debug(f"[映射] {old_name} → {new_name}")
             # ===== 5. 执行图片转换 (单次调用 传递追加覆盖参数) =====
             base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
             converter_path = base_dir / "image_converter.exe"
-            if not converter_path.exists():
-                raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
+            if not converter_path.exists(): raise FileNotFoundError("图片转换器 image_converter.exe 未找到")
             # 构建带标记的列表，格式：绝对路径|覆盖参数
-            list_lines = []
-            for p in original_images:
-                if p in high_freq_images and override_str:
-                    list_lines.append(f"{p}|{override_str}")
-                else:
-                    list_lines.append(p)
+            list_lines = [f"{p}|{override_str}" if p in high_freq_images and override_str else p for p in original_images]
             with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8', dir=self.sesame_root) as list_file:
-                list_file.write('\n'.join(list_lines))
-                list_path = list_file.name
-            logger.debug(f"[转换] 生成临时列表文件: {list_path}")
-            # 这里是正常的基准参数传入
+                list_file.write('\n'.join(list_lines)); list_path = list_file.name
+            logger.debug(f"生成临时列表文件: {list_path}")
+            # 给图片转换程序传递主命令
             cmd = [str(converter_path), "-i", f"@{list_path}"] + params
             try:
-                logger.info(f"发送图片量:{len(original_images)} ({len(high_freq_images)}张 追加参数)")
-                logger.debug("[转换] 执行命令: " + ' '.join(cmd))
+                logger.info(f"图片总数: {len(original_images)}|含{len(high_freq_images)}张 追加独立参数")
+                logger.debug(f"图片转换主命令: {' '.join(cmd)}")
                 result = subprocess.run(cmd, cwd=temp_dir, capture_output=True, check=True, encoding='utf-8', errors='replace')
                 out = result.stdout or ""
                 logger.debug("[转换] 输出日志:\n" + out)
-                m = re.search(r"成功\s*(\d+)/(\d+)", out)
-                success, total = m.groups() if m else ("0", "0")
+                m = re.search(r"成功\s*(\d+)/(\d+)", out); success, total = m.groups() if m else ("0", "0")
                 logger.success(f"图片转换成功: {success}/{total}")
             except subprocess.CalledProcessError as e:
                 err = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or "")
-                logger.error(f"[错误] 转换失败:\n{err}")
-                raise
+                logger.error(f"[错误] 转换失败:\n{err}"); raise
             finally:
                 os.remove(list_path)
                 logger.debug(f"[清理] 已删除临时文件: {list_path}")
@@ -771,98 +736,68 @@ class EpubProcessor:
             deleted_files = 0
             for old_path in original_images:
                 old_file = Path(old_path)
-                old_ext = old_file.suffix.lower()[1:]
-                # 核心修复：通过 image_mapping 拿真实的目标后缀
-                target_ext = Path(image_mapping[old_file.name]).suffix.lower()[1:] 
-                if old_ext == target_ext:
-                    logger.debug(f"[跳过] 格式相同不清理: {old_file.relative_to(temp_dir_path)}")
-                    continue
+                # 通过image_mapping获取真实后缀
+                target_ext = Path(image_mapping[old_file.name]).suffix.lower()[1:]
+                if old_file.suffix.lower()[1:] == target_ext:
+                    logger.debug(f"[跳过] 格式相同不清理: {old_file.relative_to(temp_dir_path)}"); continue
                 new_path = old_file.with_name(image_mapping[old_file.name])
                 if new_path.exists():
                     try:
-                        old_file.unlink()
-                        deleted_files += 1
+                        old_file.unlink(); deleted_files += 1
                         logger.debug(f"[清理] 已删除: {old_file.relative_to(temp_dir_path)}")
-                    except Exception as e:
-                        logger.warning(f"[警告] 删除失败 {old_path}: {str(e)}")
-                else:
-                    logger.error(f"[错误] 新文件未生成: {str(new_path.relative_to(temp_dir_path))}")
+                    except Exception as e: logger.warning(f"[警告] 删除失败 {old_path}: {e}")
+                else: logger.error(f"[错误] 新文件未生成: {new_path.relative_to(temp_dir_path)}")
             logger.info(f"共清理 {deleted_files}/{len(original_images)} 个旧图片文件")
             # ===== 7. 更新html内图片引用 =====
             updated_refs = 0
-            for file in temp_dir_path.rglob('*'):
-                if file.suffix.lower() not in ('.xhtml', '.html'):
-                    continue
+            for file in [f for f in temp_dir_path.rglob('*') if f.suffix.lower() in ('.xhtml', '.html')]:
                 try:
-                    with file.open('r+', encoding='utf-8') as f:
-                        content = f.read()
-                        original_content = content
-                        for old, new in image_mapping.items():
-                            if old in content:
-                                updated_refs += content.count(old)
-                                content = content.replace(old, new)
-                        if content != original_content:
-                            f.seek(0)
-                            f.write(content)
-                            f.truncate()
-                            logger.debug(f"[更新图片路径: {file.relative_to(temp_dir_path)}")
-                except UnicodeDecodeError:
-                    logger.warning(f"[警告] 跳过二进制文件: {file}")
-                except Exception as e:
-                    logger.error(f"[错误] 处理文件失败 {file}: {str(e)}")
+                    content = original_content = file.read_text('utf-8')
+                    for old, new in image_mapping.items():
+                        if old in content: updated_refs += content.count(old); content = content.replace(old, new)
+                    if content != original_content:
+                        file.write_text(content, 'utf-8')
+                        logger.debug(f"更新图片路径: {file.relative_to(temp_dir_path)}")
+                except UnicodeDecodeError: logger.warning(f"[警告] 跳过二进制文件: {file}")
+                except Exception as e: logger.error(f"[错误] 处理文件失败 {file}: {e}")
             logger.info(f"共更新 {updated_refs} 个图片路径引用")
             # ===== 8. 强制更新OPF媒体类型 =====
-            logger.info("更新图片OPF清单")
+            logger.info("更新opf媒体类型和路径")
             try:
-                # 定位OPF文件
+                # 定位OPF文件并解析
                 opf_path = self._get_opf_path(temp_dir_path)
                 logger.debug(f"[OPF] 定位到主文档: {opf_path.relative_to(temp_dir_path)}")
                 # 解析并修改OPF
-                with open(opf_path, 'r+', encoding='utf-8') as f:
-                    soup = BeautifulSoup(f.read(), 'xml')
-                    modified = False
-                    for item in soup.find_all('item'):
-                        href = item.get('href', '')
-                        if not href:
-                            continue
-                        # 规范化路径处理
-                        decoded_href = unquote(href)
-                        normalized_href = Path(decoded_href).resolve()
-                        file_name = normalized_href.name
-                        ext = normalized_href.suffix[1:].lower()
-                        # 检查是否为图片项
-                        if ext not in media_map:
-                            continue
-                        changes = []
-                        if file_name in image_mapping:
-                            new_name = image_mapping[file_name]
-                            target_ext = Path(new_name).suffix[1:].lower() # 核心修复：拿真实转化后的后缀去匹配 media_map
-                            item['href'] = href.replace(file_name, new_name)
-                            changes.append(f"路径: {file_name} → {new_name}")
-                            new_type = media_map[target_ext]
-                            if item.get('media-type') != new_type:
-                                old_type = item.get('media-type', '未知')
-                                item['media-type'] = new_type
-                                changes.append(f"类型: {old_type} → {new_type}")
-                                modified = True
-                        if changes:
-                            logger.debug(f"[OPF] 更新: {' | '.join(changes)}")
-                    if modified:
-                        f.seek(0)
-                        f.write(str(soup))
-                        f.truncate()
-                        logger.success("更新图片OPF清单 完成")
-                    else:
-                        logger.info("图片OPF清单 无需修改")
-            except Exception as e:
-                logger.error(f"[严重错误] OPF处理失败: {str(e)}")
-                raise
-        except Exception as e:
-            logger.error(f"流程异常终止: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            logger.info("图片处理流程结束")
+                soup, modified = BeautifulSoup(opf_path.read_text('utf-8'), 'xml'), False
+                for item in soup.find_all('item'):
+                    if not (href := item.get('href', '')): continue
+                    # 规范化路径处理
+                    decoded_href = unquote(href); normalized_href = Path(decoded_href).resolve()
+                    file_name, ext = normalized_href.name, normalized_href.suffix[1:].lower()
+                    # 检查是否为图片项且在映射表中存在对应项
+                    if ext not in media_map or file_name not in image_mapping: continue
+                    new_name = image_mapping[file_name]; target_ext = Path(new_name).suffix[1:].lower()
+                    changes = []
+                    #  更新路径
+                    if file_name != new_name:
+                        item['href'] = href.replace(file_name, new_name)
+                        changes.append(f"路径: {file_name} → {new_name}"); modified = True
+                    # 更新媒体类型
+                    new_type = media_map.get(target_ext)
+                    if new_type and item.get('media-type') != new_type:
+                        old_type = item.get('media-type', '未知')
+                        item['media-type'] = new_type
+                        changes.append(f"类型: {old_type} → {new_type}"); modified = True
+                    if changes:
+                        logger.debug(f"[opf]更新:{' | '.join(changes)}")
+                if modified:
+                    opf_path.write_text(str(soup), 'utf-8')
+                    logger.success("更新opf媒体类型和路径 √")
+                else:
+                    logger.info("opf媒体类型和路径 无需修改")
+            except Exception as e: logger.error(f"[严重错误] OPF处理失败: {e}"); raise
+        except Exception as e: logger.error(f"流程异常终止: {e}"); import traceback; traceback.print_exc()
+        finally: logger.info("图片处理流程结束")
 
     def show_exclude_dialog(self):
         """章节合并排除/正则追加分割章节 对话框"""
