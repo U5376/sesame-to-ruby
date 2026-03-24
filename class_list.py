@@ -20,7 +20,7 @@ class ClassList:
         self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
         self.workers_cfg = workers_cfg
         self.win_size = win_size
-        self.style_data, self.samples_data, self.counts_data = {}, {}, {}
+        self.style_data, self.samples_data, self.counts_data, self.img_counts = {}, {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
         self.all_items_refs, self.n_map, self.st = [], {"": ""}, {"#0": False, "count": False}
         self.preview_window = self.details_window = None
@@ -69,10 +69,12 @@ class ClassList:
         
         ttk.Button(lf_top, text="保存", width=5, command=save_changes).pack(side="right")
         lf_tree_frame = ttk.Frame(lf); lf_tree_frame.pack(fill="both", expand=True, padx=(3, 0), pady=2)
-        ftree = ttk.Treeview(lf_tree_frame, show="tree", selectmode="extended")
-        ftree.pack(side="left", fill="both", expand=True)
+        # 添加一个隐藏列用于右对齐显示图片计数，设置 width 并禁止拉伸
+        ftree = ttk.Treeview(lf_tree_frame, show="tree", selectmode="extended", columns=("img_count",))
         f_vsb = ttk.Scrollbar(lf_tree_frame, command=ftree.yview); f_vsb.pack(side="right", fill="y")
         ftree.config(yscrollcommand=f_vsb.set)
+        ftree.pack(side="left", fill="both", expand=True)
+        ftree.column("img_count", width=30, anchor="center", stretch=False)
         
         # 文件树右键菜单 选中项删除确认及内存标记
         ftree_menu = tk.Menu(ftree, tearoff=0)
@@ -198,7 +200,7 @@ class ClassList:
                     return os.startfile(target) if hasattr(os, 'startfile') else __import__('subprocess').run(['open', target])
                 # 内存读取预览文本逻辑 显示内容+正则搜索
                 key = "class_list_preview"
-                rec = self.win_size.setup(win := tk.Toplevel(cw), key, f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}", mode='cascade')
+                rec = self.win_size.setup(win := tk.Toplevel(cw), key, f"600x500+{self.root.winfo_x()-300}+{self.root.winfo_y()+50}", mode='cascade')
                 win.bind('<Configure>', rec, add='+')
                 win.protocol("WM_DELETE_WINDOW", win.destroy); win.focus_force()
                 state = {"current_file": p, "search_results": [], "search_index": -1, "last_q": None} # 状态存储 (用于搜索)
@@ -314,27 +316,46 @@ class ClassList:
 
         # 解析单个HTML文件的函数（子线程执行：纯计算，无UI操作）
         def _parse_html_file(file_content_bytes, filename):
-            results = {'counts': {}, 'samples': {}, 'class_tags': []}
+            results = {'counts': {}, 'samples': {}, 'class_tags': [], 'img_counts': {}}
             try:
-                # 处理xhtml 使用 XPath 仅提取带 class 的标签
+                import posixpath # 性能优于pathlib 且强制使用正斜杠符合epub规范
                 root = lxml.html.fromstring(file_content_bytes)
-                for el in root.xpath('//*[@class]'):
+                base_dir = posixpath.dirname(filename)
+                # XPath 一次遍历提取class、img、svg、image的标签
+                for el in root.xpath('//*[@class] | //img | //*[(local-name()="image")]'):
                     tag = el.tag.rsplit('}', 1)[-1].lower()
-                    cls_list = el.get('class').split()
-                    s_raw = ""
-                    # 性能优化：在子线程预先判断是否需要提取实例字符串
-                    if any(len(self.samples_data.get(c, [])) < 15 for c in cls_list):
-                        s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
-                    for c in cls_list:
-                        results['counts'][c] = results['counts'].get(c, 0) + 1
-                        results['class_tags'].append((c, tag))
-                        if s_raw and len(results['samples'].get(c, [])) < 15: # 每个class仅收集前15个实例，避免过度内存占用
-                            results['samples'].setdefault(c, []).append((filename, re.sub(r'\s+', ' ', s_raw)[:150]))
-            except: pass
+                    # 处理图片路径
+                    if tag in ('img', 'image'):
+                        src = el.get('src') or el.get('href') or el.get('{http://www.w3.org/1999/xlink}href')
+                        if src and not src.startswith(('http', 'data:')):
+                            # 规范化路径，处理 ../ 符号并去掉 URL 参数/锚点
+                            clean_src = src.split('#')[0].split('?')[0]
+                            abs_p = posixpath.normpath(posixpath.join(base_dir, clean_src))
+                            results['img_counts'][abs_p] = results['img_counts'].get(abs_p, 0) + 1
+                    # 处理包含class的节点（这里不使用elif，因为img也可能带有class）
+                    if cls_str := el.get('class'):
+                        cls_list = cls_str.split()
+                        s_raw = ""
+                        # 性能优化：在子线程预先判断是否需要提取实例字符串
+                        if any(len(self.samples_data.get(c, [])) < 15 for c in cls_list):
+                            s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
+                        for c in cls_list:
+                            results['counts'][c] = results['counts'].get(c, 0) + 1
+                            results['class_tags'].append((c, tag))
+                            if s_raw and len(results['samples'].get(c, [])) < 15: # 每个class仅收集前15个实例，避免过度内存占用
+                                results['samples'].setdefault(c, []).append((filename, re.sub(r'\s+', ' ', s_raw)[:150]))
+            except Exception as e:
+                logger.error(f"解析 {filename} 出错: {e}")
             return results
 
         # 合并解析结果到主数据结构（主线程执行：包含UI更新）
         def _merge_results(results):
+            # 同步更新左侧文件树的图片计数
+            for p, cnt in results.get('img_counts', {}).items():
+                self.img_counts[p] = self.img_counts.get(p, 0) + cnt
+                if p in self.n_map and ftree.exists(self.n_map[p]):
+                    ftree.item(self.n_map[p], values=(f"{self.img_counts[p]}",))
+
             for c, cnt in results['counts'].items():
                 self.counts_data[c] = self.counts_data.get(c, 0) + cnt
                 # 处理html提取的class数据 (保留原码判断逻辑与Treeview更新)
@@ -414,7 +435,7 @@ class ClassList:
         def show_details(event=None):
             if not (item := (tree.identify_row(event.y) if event else (tree.selection() or [None])[0])) or item in nodes.values(): return
             win = tk.Toplevel(cw)
-            rec = self.win_size.setup(win, "class_list_details", f"500x480+{self.root.winfo_x()+140}+{self.root.winfo_y()+80}", mode='cascade')
+            rec = self.win_size.setup(win, "class_list_details", f"500x480+{self.root.winfo_x()+320}+{self.root.winfo_y()-20}", mode='cascade')
             win.bind('<Configure>', rec, add='+')
             win.protocol("WM_DELETE_WINDOW", win.destroy); win.focus_force()
             # 获取下一个节点的 lambda，用于左右键切换
