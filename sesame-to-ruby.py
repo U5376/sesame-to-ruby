@@ -249,14 +249,12 @@ def mp_process_single_file_pipeline(args):
         if flags.get('remove_blank') != '-' or flags.get('limit_blank') != '-':
             mp_process_blank_lines(soup, flags.get('remove_blank'), flags.get('limit_blank'))
 
-        # 最终定型文本
-        content = mp_fmt(soup)
-
         # ==============================================================
-        # 4: XML声明回补与保存
-        if flags.get('is_style') and not content.strip().startswith('<?xml'):
-            # 如果进行了头部规格化但缺失XML声明，则补全一个标准声明
-            content = f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n{content}'
+        # 4: XML声明与保存
+        if flags.get('is_style') and (html_tag := soup.find('html')): # 只输出html标签内的内容 强制规格化xml声明跟DOCTYPE信息
+            content = f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n{mp_fmt(html_tag)}'
+        else: # 如果没勾选样式修改，则直接导出整个soup 
+            content = mp_fmt(soup)
 
         Path(xf_str).write_text(content, 'utf-8')
         return (True, xf_str, "")
