@@ -326,7 +326,8 @@ class ClassList:
                     tag = el.tag.rsplit('}', 1)[-1].lower()
                     # 处理图片路径
                     if tag in ('img', 'image'):
-                        src = el.get('src') or el.get('href') or el.get('{http://www.w3.org/1999/xlink}href')
+                        # 兼容src、href、xlink:href等属性
+                        src = el.get('src') or el.get('href') or el.get('xlink:href') or el.get('{http://www.w3.org/1999/xlink}href')
                         if src and not src.startswith(('http', 'data:')):
                             # 规范化路径，处理 ../ 符号并去掉 URL 参数/锚点
                             clean_src = src.split('#')[0].split('?')[0]
