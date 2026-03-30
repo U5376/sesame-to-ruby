@@ -1,34 +1,37 @@
 ﻿/*注释文字跟注释内容设置*/
-.duokan-footnote{font-size:1.2em;}
-notetag{font-size:1.2em;}
-img.zhangyue-footnote{width:8%;}
+.duokan-footnote{font-size: 1.2em;}
+notetag{font-size: 1.2em;}
+img.zhangyue-footnote{width: 8%;}
 
-/*插图设置*/
 /*图片并列显示 td单元格 tr表格的一行 taody把td tr视为一个结构 table表格(整个表格的内容)*/
 /*背景颜色设置<body bgcolor="#fff">*/
-/*彩插页相关*/
-.caicha {
-    width: 100%;
-    max-width: 25em;
-    height: auto;
-    padding: 0;
-    margin: 0;
-}
+
 .illus{
     text-indent: 0em;
     text-align: center;
 }
-.illus img{
-  width: 100%;
+.illus img {
+    max-width: 100%;
+    max-height: 100vh;
+    width: auto;
+    height: auto;
 }
 
-.illu div {
-    margin: 0.4em 0em;
-    text-indent: 0;
-    duokan-text-indent: 0;
-    line-height: 1.2em;
-}
-hr {border-color:black;}
+hr {border-color: black;}
 ruby rt {font-size: 0.7em;}
-img.gaiji {width:1.2em;height:1.2em;}
+img.gaiji {height: 1.3em;}
+.gaiji-line {height: 1.5em;}
 .bold {font-weight: bold;}
+
+.font-0em80{font-size: 80%;}
+.font-085per {font-size: 85%;}
+.font-095per {font-size: 95%;}
+.font-110per {font-size: 110%;}
+.font-120per {font-size: 120%;}
+.font-130per {font-size: 130%;}
+.font-150per {font-size: 150%;}
+.font-200per {font-size: 200%;}
+
+.font-0em80 {font-size:  0.80em;}
+.font-1em10 {font-size:  1.10em;}
+.font-1em30 {font-size:  1.30em;}
