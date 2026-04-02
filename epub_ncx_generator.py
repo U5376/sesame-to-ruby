@@ -54,14 +54,23 @@ class EpubNCXGenerator:
         try:
             opf_path = Path(opf_path)
             content = opf_path.read_text(encoding='utf-8')
-            content = re.sub(
-                r'<package[^>]+>',
-                '<package version="2.0" unique-identifier="BookId" xmlns="http://www.idpf.org/2007/opf">',
-                content
-            )
-            content = re.sub(r'\s+prefix="[^"]+"', '', content) # 删除 prefix 属性（EPUB 3 专属）
-            opf_path.write_text(content, encoding='utf-8')
             soup = BeautifulSoup(content, 'xml')
+            # 规格化package标签
+            package_tag = soup.find('package')
+            if package_tag:
+                uid = package_tag.get('unique-identifier', 'BookId')
+                package_tag.attrs = {
+                    'version': '2.0',
+                    'unique-identifier': uid,
+                    'xmlns': "http://www.idpf.org/2007/opf"}
+            # 规格化metadata标签
+            metadata_tag = soup.find('metadata')
+            if metadata_tag:
+                metadata_tag.attrs.pop('xmlns:opf', None) # 会导致bs4追加opf:前缀 现在姑且删掉 有opf:前缀的标签会自动修正成没前缀的
+                metadata_tag.attrs.pop('prefix', None) # 删除prefix属性(epub3专属)
+                # 确保存在dc命名空间声明
+                if 'xmlns:dc' not in metadata_tag.attrs:
+                    metadata_tag.attrs['xmlns:dc'] = "http://purl.org/dc/elements/1.1/"
             nav_item = soup.find('item', properties='nav')
             # 寻找 EPUB 根目录（包含 mimetype 文件的目录，若无则默认为 OPF 所在目录）
             epub_root = next((p for p in opf_path.parents if (p / 'mimetype').exists()), opf_path.parent)
