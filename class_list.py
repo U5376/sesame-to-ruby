@@ -260,18 +260,18 @@ class ClassList:
                     state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(state["search_results"]) if not reset else state["search_index"]
                     target = state["search_results"][state["search_index"]]
                     if target["path"] != state["current_file"]: load_content_to_text(target["path"])
-                    # 批量高亮所有匹配项 (分批渲染防止卡顿)
-                    s_idx, cv, m_rs = "1.0", tk.IntVar(), []
-                    while (s_idx := txt.search(q, s_idx, "end", count=cv, regexp=True)):
-                        m_rs.extend((s_idx, s_idx := f"{s_idx}+{cv.get()}c"))
+                    # 分批高亮所有匹配项 txt.search改用re以支持\b等高级正则
+                    ms, m_rs = list(re.finditer(q, txt.get("1.0", "end-1c"))), []
+                    for m in ms:
+                        m_rs.extend((f"1.0+{m.start()}c", f"1.0+{m.end()}c"))
                         if len(m_rs) >= 1000: txt.tag_add("m", *m_rs); m_rs.clear() # 500个匹配项一批 分批渲染
                     if m_rs: txt.tag_add("m", *m_rs)
                     # 高亮并跳转到当前特定匹配项
-                    m_idx, s_idx = sum(1 for i in range(state["search_index"]) if state["search_results"][i]["path"] == target["path"]), "1.0"
-                    for _ in range(m_idx + 1): 
-                        if not (s_idx := txt.search(q, s_idx, "end", count=cv, regexp=True)): break
-                        if _ == m_idx: (txt.tag_add("cur", s_idx, (nxt := f"{s_idx}+{cv.get()}c")), txt.see(s_idx))
-                        s_idx = f"{s_idx}+{cv.get()}c"
+                    m_idx = sum(1 for i in range(state["search_index"]) if state["search_results"][i]["path"] == target["path"])
+                    if m_idx < len(ms):
+                        m = ms[m_idx]
+                        txt.tag_add("cur", (s_idx := f"1.0+{m.start()}c"), f"1.0+{m.end()}c")
+                        txt.see(s_idx)
                     sl.config(text=f"{state['search_index'] + 1}/{len(state['search_results'])}")
 
                 # 批量绑定快捷键：左右键切换文件，上下键切换搜索结果，输入框自动防抖搜索
