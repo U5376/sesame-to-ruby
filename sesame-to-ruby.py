@@ -135,8 +135,8 @@ def mp_post_process_images(soup):
                     else:  # 如果是 svg，替换 svg
                         tag.replace_with(new_div)
 
-def mp_process_blank_lines(soup, remove_blank, limit_blank):
-    """全局空行清理与连续空行限制"""
+def mp_process_blank_lines(soup, remove_blank, limit_blank, remove_head_blank=False):
+    """全局空行清理与连续空行限制、首部空行清理"""
     def is_blank_tag(tag):
         if tag.name == 'br': return True
         if tag.name == 'p':
@@ -162,31 +162,39 @@ def mp_process_blank_lines(soup, remove_blank, limit_blank):
                 if node.name == 'div': yield from flatten_nodes(node)
                 else: yield node
             else: yield node
-    def group_blanks(nodes):
-        groups, group = [], []
-        for node in nodes:
-            if isinstance(node, str):
-                if not node.strip(): continue
-                if group: groups.append(group); group = []
-                continue
-            if hasattr(node, 'name') and is_blank_tag(node): group.append(node)
-            else:
-                if group: groups.append(group); group = []
-        if group: groups.append(group)
-        return groups
-    
-    flat_nodes = list(flatten_nodes(soup.body if soup.body else soup))
-    blank_groups = group_blanks(flat_nodes)
-    # 先执行空行删除，再执行空行限制
-    if remove_blank != '-':
-        to_delete = int(remove_blank)
-        for group in blank_groups:
-            for t in group[:to_delete]: t.decompose()
-        blank_groups = group_blanks(list(flatten_nodes(soup.body if soup.body else soup)))
-    if limit_blank != '-':
-        limit = int(limit_blank)
-        for group in blank_groups:
-            for t in group[limit:]: t.decompose()
+
+    body = soup.body if soup.body else soup
+    all_nodes = list(flatten_nodes(body))  # DOM树扁平化采样
+    if not all_nodes: return
+    to_delete_ids = set() # 存放需要删除节点的内存地址
+    cursor = 0
+    # 1. 计算清理首部空行 通过游标快速定位第一个实质内容
+    if remove_head_blank:
+        for node in all_nodes:
+            if hasattr(node, 'name') and is_blank_tag(node):
+                to_delete_ids.add(id(node))
+                cursor += 1
+            else: break # 遇到第一个非空行节点停止
+    # 2.计算连续空行的删除与限制
+    if remove_blank != '-' or limit_blank != '-':
+        del_limit = (int(remove_blank) if remove_blank != '-' else 0, 
+                     int(limit_blank) if limit_blank != '-' else float('inf'))
+        group = []
+        # 接受连续空行列表，按照删除数量和限制数量标记需要删除的节点
+        def process_group(target_group):
+            d, l = del_limit
+            for idx, g_node in enumerate(target_group):
+                if idx < d or idx >= (d + l): to_delete_ids.add(id(g_node))
+        # 遍历剩余节点，按照连续空行分组，处理每组内的删除与限制逻辑
+        for node in all_nodes[cursor:]:
+            if hasattr(node, 'name') and is_blank_tag(node):
+                group.append(node)
+            elif group:
+                process_group(group); group.clear()
+        if group: process_group(group) # 收尾最后一组
+    # 3. 统一执行物理删除
+    for node in all_nodes:
+        if id(node) in to_delete_ids: node.decompose()
 
 def mp_normalize_xhtml_header(soup, lang_val, rel_css):
     """xhtml规格化头部信息与CSS重建"""
@@ -246,8 +254,8 @@ def mp_process_single_file_pipeline(args):
         soup = BeautifulSoup(content, 'html.parser')
 
         if flags.get('is_process_images'): mp_post_process_images(soup)
-        if flags.get('remove_blank') != '-' or flags.get('limit_blank') != '-':
-            mp_process_blank_lines(soup, flags.get('remove_blank'), flags.get('limit_blank'))
+        if flags.get('remove_blank') != '-' or flags.get('limit_blank') != '-' or flags.get('remove_head_blank'):
+            mp_process_blank_lines(soup, flags.get('remove_blank'), flags.get('limit_blank'), flags.get('remove_head_blank'))
 
         # ==============================================================
         # 4: XML声明与保存
@@ -331,6 +339,7 @@ class EpubProcessor:
             ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [
                 ('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN'),
                 ('max_workers_var', 'Auto', ttk.Combobox, {'w': 4, 'px': (110,0), 'val': ['Auto']+[str(i) for i in range(1, 33)]}, '多线程/进程并发数\nAuto限制最高为8')]),
+            ('remove_head_blank_enabled', '清理首部空行', '自动删除顶部空行 直到遇到非空节点为止\n(属于全局空行删除与限制的附加功能)', []),
         ]
         # 1.变量初始化
         for k, _, _, ex in self.CFG:
@@ -478,7 +487,8 @@ class EpubProcessor:
                 'is_modify_html': self.modify_html_enabled.get(),
                 'is_process_images': self.process_images_enabled.get(),
                 'remove_blank': self._settings_vars_dict['merge_remove_blank_lines_var'].get(),
-                'limit_blank': self._settings_vars_dict['merge_limit_blank_lines_var'].get()
+                'limit_blank': self._settings_vars_dict['merge_limit_blank_lines_var'].get(),
+                'remove_head_blank': self._settings_vars_dict['remove_head_blank_enabled'].get()
             }
             lang_val = self.set_lang_var.get().strip() if flags_dict['is_lang'] else "ja"
             class_name = self.class_name_var.get()
