@@ -332,14 +332,15 @@ class EpubProcessor:
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
                  ('-f 可选webp,jpg,png\n-q 质量\n-H -W 高宽按比例缩小,小图不放大\n'
                   '-s 锐化 默认1.0不处理\n-A 保留透明通道Alpha\n-w 线程数\n-m WebP压缩等级 1-6'))]),
-            ('auto_override_enabled', '旋转图片', '用于 飾り罫線 自动旋转\n超过阈值追加覆盖成新的转换参数', [
+            ('auto_override_enabled', '旋转图片', '用于 飾り罫線 自动旋转\n超过阈值追加覆盖成新的转换参数\n需要触发阈值、没被排除、-R参数命中才会旋转', [
                 ('override_count_var', '10', tk.Entry, {'w': 3}, '触发追加参数的最低出现次数阈值'),
+                ('override_skip_var', 'gaiji', tk.Entry, {'w': 8, 'px': (4,0)}, '正则排除图片(匹配class或src)\n例:gaiji|cover\\.jpg |隔开多个输入'),
                 ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (4,0), 'sticky': 'ew'}, 
                  '追加覆盖的参数\n-r-90 [旋转方向(+90,-90,180,270)默认0不旋转]\n-R1:2 [触发旋转的比例(1.5, 128x1366, 1:2)，为空则不限制]')]),
             ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [
                 ('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN'),
                 ('max_workers_var', 'Auto', ttk.Combobox, {'w': 4, 'px': (110,0), 'val': ['Auto']+[str(i) for i in range(1, 33)]}, '多线程/进程并发数\nAuto限制最高为8')]),
-            ('remove_head_blank_enabled', '清理首部空行', '自动删除顶部空行 直到遇到非空节点为止\n(属于全局空行删除与限制的附加功能)', []),
+            ('remove_head_blank_enabled', '清理首部空行', '自动删除顶部空行 遇到非空节点停止\n(属于全局空行删除与限制的附加功能)', []),
         ]
         # 1.变量初始化
         for k, _, _, ex in self.CFG:
@@ -700,15 +701,27 @@ class EpubProcessor:
             if hasattr(self, 'auto_override_enabled') and self.auto_override_enabled.get():
                 try:
                     threshold, img_counts = int(self.override_count_var.get()), {}
-                    # 只处理 .xhtml/.html 文件，且排除 nav.xhtml跟包含gaiji图片的标签
+                    excluded_paths = set()
+                    skip_rule = getattr(self, 'override_skip_var', tk.StringVar(value='gaiji')).get().strip()
+                    skip_re = re.compile(skip_rule) if skip_rule else None
+                    # 只处理 .xhtml/.html 文件，且排除 nav.xhtml 正则排除图片(匹配class或src)
                     for html_file in [f for f in temp_dir_path.rglob('*') if f.suffix.lower() in ('.xhtml', '.html') and f.name.lower() != 'nav.xhtml']:
                         soup = BeautifulSoup(html_file.read_text('utf-8', 'ignore'), 'html.parser')
-                        for img in [i for i in soup.find_all('img') if 'gaiji' not in i.get('class', [])]:
+                        for img in soup.find_all('img'):
                             if (src := img.get('src')) and (abs_src := (html_file.parent / unquote(src)).resolve()).exists():
-                                img_counts[str(abs_src)] = img_counts.get(str(abs_src), 0) + 1
-                    high_freq_images = {p for p, c in img_counts.items() if c >= threshold}
-                    for p in high_freq_images:
-                        logger.info(f"[追加参数候选] {Path(p).name} 出现{img_counts[p]}次 将追加独立参数")
+                                p_str = str(abs_src)
+                                img_counts[p_str] = img_counts.get(p_str, 0) + 1
+                                # 命中排除正则记录到 excluded_paths
+                                if skip_re and (skip_re.search(' '.join(img.get('class', []))) or skip_re.search(src)):
+                                    excluded_paths.add(p_str)
+                    for p, c in {k: v for k, v in img_counts.items() if v >= threshold}.items():
+                        img_name = Path(p).name
+                        if p not in excluded_paths and override_str:
+                            high_freq_images.add(p)
+                            logger.info(f"[追加参数候选] {img_name} 出现{c}次 将追加独立参数")
+                        else:
+                            reason = "命中排除规则" if p in excluded_paths else "未配置追加参数"
+                            logger.info(f"[追加参数候选] {img_name} 出现{c}次 【{reason}】")
                 except Exception as e: logger.error(f"统计图片时出错: {e}")
             # ===== 4. 生成文件名映射 =====
             # 判断是否应用了覆盖参数，从而赋予正确的后缀
