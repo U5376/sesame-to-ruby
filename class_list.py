@@ -41,7 +41,6 @@ class ClassList:
                                                       c.destroy()))
         rec = self.win_size.setup(cw, "class_list_main", f"600x480+{self.root.winfo_x()+30}+{self.root.winfo_y()+30}", mode='cascade')
         cw.bind('<Configure>', rec, add='+')
-        cw.protocol("WM_DELETE_WINDOW", cw.destroy)
         pw = ttk.PanedWindow(cw, orient="horizontal"); pw.pack(fill="both", expand=True)
 
         # 左侧文件树
