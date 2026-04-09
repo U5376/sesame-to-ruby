@@ -58,10 +58,9 @@ class EpubNCXGenerator:
             # 规格化package标签
             package_tag = soup.find('package')
             if package_tag:
-                uid = package_tag.get('unique-identifier', 'BookId')
                 package_tag.attrs = {
                     'version': '2.0',
-                    'unique-identifier': uid,
+                    'unique-identifier': "BookId", # 关联dc:identifier[@id](EPUB标准).然而对上了sigil元数据会不显示,没啥必要维持原值
                     'xmlns': "http://www.idpf.org/2007/opf"}
             # 规格化metadata标签
             metadata_tag = soup.find('metadata')
