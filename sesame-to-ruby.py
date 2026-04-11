@@ -856,12 +856,16 @@ class EpubProcessor:
             ttk.Style().map("Treeview", foreground=[e for e in ttk.Style().map("Treeview", query_opt="foreground") if e[:2] != ("!disabled", "!selected")]) #修复py3.8 Tk8.6.9树视图tag颜色失效Bug
             tree.delete(*tree.get_children())
             tree.tag_configure("mis", font=("", 10, "overstrike"), foreground="gray") # 定义删除线样式
-            ex = getattr(self, "excluded_toc_entries", [])
+            tree.tag_configure("warn", foreground="red")
+            ex, sn = getattr(self, "excluded_toc_entries", []), {f.name for f in self._get_spine_ordered_files(opf)}
             for idx, e in enumerate(self._curr_toc):
                 t, h = e.get('title', ''), e['href']
-                # 判定：非虚拟章节且物理文件不存在时，标记为 mis
-                tag = ("mis",) if "_spt_" not in h and not (opf.parent / unquote(h.split('#')[0])).exists() else ()
-                iid = tree.insert("", "end", iid=str(idx), values=(("\u3000"*e.get('depth', 0)) + t, unquote(h)), tags=tag)
+                fn = unquote(h.split('#')[0]).split('/')[-1]
+                p_ex = (opf.parent / unquote(h.split('#')[0])).exists()
+                # 判定：路径不存在的文件用mis 不在spine内用warn
+                tag = ("mis",) if "_spt_" not in h and not p_ex else (("warn",) if "_spt_" not in h and fn not in sn else ())
+                pre = "[!路径文件不存在] " if tag == ("mis",) else ("[!spine列表内不存在] " if tag == ("warn",) else "")
+                iid = tree.insert("", "end", iid=str(idx), values=(("\u3000"*e.get('depth', 0)) + pre + t, unquote(h)), tags=tag)
                 # 匹配逻辑：1.记忆中的href 2.完整匹配 3.无锚点匹配 4.标题匹配
                 if h in self._saved_hrefs or (t, h) in ex or (t, h.split('#')[0]) in ex or any(t == x[0] for x in ex): tree.selection_add(iid)
         def run_splits():
