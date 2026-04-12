@@ -958,30 +958,36 @@ class EpubProcessor:
             title = (re.search(r'<title>(.*?)</title>', raw, re.I) or [0, "Chapter"])[1]
             lang = (re.search(r'xml:lang="(.*?)"', raw, re.I) or [0, "ja"])[1]
             logger.debug(f"正在分割文件: {n} | 当前锚点: {last_href}")
-            hf.write_text(raw[:ms[0].start()].split("</body>")[0] + "\n</body>\n</html>", 'utf-8')
-            ivs, subs, cur_h = [m.start() for m in ms] + [len(raw)], [], hf.relative_to(opf_p.parent).as_posix()
+            # 首行判定：剥离标签/实体/空白后无文本，且无图片标签，则视为首部与第一章重合
+            body_m = re.search(r'<body[^>]*>', raw, re.I)
+            pre = raw[body_m.end():ms[0].start()] if body_m else raw[:ms[0].start()]
+            is_empty_prefix = not re.sub(r'&#?\w+;|\s+', '', re.sub(r'<[^>]+>', '', pre)) and not re.search(r'<(img|image|svg)\b', pre, re.I)
+            ivs, cur_h, subs = [m.start() for m in ms] + [len(raw)], hf.relative_to(opf_p.parent).as_posix(), []
+            # 若首部为空 沿用原文件.否则仅保留匹配条目前的内容，匹配条目后的内容正常切割出新文件
+            hf.write_text(raw[:ivs[1 if is_empty_prefix else 0]].split("</body>")[0] + "\n</body>\n</html>", 'utf-8')
             # 依规则原序提取子章节信息 (1=同级/父, 2=子级)
             for i, m in enumerate(ms):
-                new_f = hf.parent / f"{hf.stem}_spt_{i+1:03d}.xhtml"
-                new_f.write_text(TPL.format(l=lang, t=title, c=raw[ivs[i]:ivs[i+1]].split("</body>")[0].strip()), 'utf-8')
                 # 直接从 rules 匹配层级 (r[0]=pattern, r[2]=level)，匹配不到则默认为 2
-                matched = m.group()
-                s = {
-                    'id': new_f.stem.replace('.', '_'), 
-                    'href': new_f.relative_to(opf_p.parent).as_posix(), 
-                    'title': self._clean_title(matched), 
-                    'depth': next((r[2] for r in rules if re.search(f"(?:{r[0]})", matched)), 2)
-                }
+                depth = next((r[2] for r in rules if re.search(f"(?:{r[0]})", m.group())), 2)
+                t_clean = self._clean_title(m.group())
+                # 判定：如果是首行重复则复用原文件路径，否则生成spt序列文件
+                use_orig = (i == 0 and is_empty_prefix)
+                sid = f"{hf.stem}_s0" if use_orig else f"{hf.stem}_spt_{i+1:03d}"
+                shref = cur_h if use_orig else (hf.parent / f"{sid}.xhtml").relative_to(opf_p.parent).as_posix()
+                if not use_orig:
+                    (hf.parent / f"{sid}.xhtml").write_text(TPL.format(l=lang, t=title, c=raw[ivs[i]:ivs[i+1]].split("</body>")[0].strip()), 'utf-8')
+                s = {'id': sid.replace('.', '_'), 'href': shref, 'title': t_clean, 'depth': depth}
                 subs.append(s)
-                logger.debug(f"匹配条目: 标题={s['title']}, 层级={s['depth']}, 文件={new_f.name}")
+                logger.debug(f"匹配条目{'(首行复用)' if use_orig else ''}: 标题={s['title']}, 层级={s['depth']}, 文件={shref.split('/')[-1]}")
             # OPF 原位插入(Manifest 紧跟原文件，Spine 保持顺序)
             soup = BeautifulSoup(opf_p.read_text('utf-8'), 'xml')
             if (old_it := soup.find('item', href=cur_h)) and (old_rf := soup.find('itemref', idref=old_it['id'])):
                 for s in subs:
-                    if not soup.find('item', id=s['id']):
+                    if s['href'] != cur_h and not soup.find('item', id=s['id']):
                         old_it.insert_after(ni := soup.new_tag('item', id=s['id'], href=s['href'], **{'media-type': 'application/xhtml+xml'}))
                         old_it = ni
-                [old_rf.insert_after(soup.new_tag('itemref', idref=s['id'])) for s in reversed(subs)]
+                for s in reversed(subs):
+                    if s['href'] != cur_h: old_rf.insert_after(soup.new_tag('itemref', idref=s['id']))
                 opf_p.write_text(str(soup), 'utf-8')
             try:
                 if (added := EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, subs)):
