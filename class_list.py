@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -14,11 +15,12 @@ from loguru import logger
 from tkinterdnd2 import DND_FILES
 
 class ClassList:
-    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, win_size=None):
+    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, workers_cfg='Auto', win_size=None):
         self.root, self.epub_path = root, epub_path
         self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
+        self.workers_cfg = workers_cfg
         self.win_size = win_size
-        self.style_data, self.samples_data, self.counts_data = {}, {}, {}
+        self.style_data, self.samples_data, self.counts_data, self.img_counts = {}, {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
         self.all_items_refs, self.n_map, self.st = [], {"": ""}, {"#0": False, "count": False}
         self.preview_window = self.details_window = None
@@ -37,7 +39,8 @@ class ClassList:
                                                       [(w.unbind('<Destroy>'), w.destroy()) for w in c.winfo_children()], 
                                                       [clean_old_epub_cache()],  # 关闭时清理旧缓存
                                                       c.destroy()))
-        self.win_size.setup(cw, "class_list_main", f"600x480+{self.root.winfo_x()+-30}+{self.root.winfo_y()+30}")
+        rec = self.win_size.setup(cw, "class_list_main", f"600x480+{self.root.winfo_x()+30}+{self.root.winfo_y()+30}", mode='cascade')
+        cw.bind('<Configure>', rec, add='+')
         pw = ttk.PanedWindow(cw, orient="horizontal"); pw.pack(fill="both", expand=True)
 
         # 左侧文件树
@@ -65,10 +68,12 @@ class ClassList:
         
         ttk.Button(lf_top, text="保存", width=5, command=save_changes).pack(side="right")
         lf_tree_frame = ttk.Frame(lf); lf_tree_frame.pack(fill="both", expand=True, padx=(3, 0), pady=2)
-        ftree = ttk.Treeview(lf_tree_frame, show="tree", selectmode="extended")
-        ftree.pack(side="left", fill="both", expand=True)
+        # 添加一个隐藏列用于右对齐显示图片计数，设置 width 并禁止拉伸
+        ftree = ttk.Treeview(lf_tree_frame, show="tree", selectmode="extended", columns=("img_count",))
         f_vsb = ttk.Scrollbar(lf_tree_frame, command=ftree.yview); f_vsb.pack(side="right", fill="y")
         ftree.config(yscrollcommand=f_vsb.set)
+        ftree.pack(side="left", fill="both", expand=True)
+        ftree.column("img_count", width=30, anchor="center", stretch=False)
         
         # 文件树右键菜单 选中项删除确认及内存标记
         ftree_menu = tk.Menu(ftree, tearoff=0)
@@ -194,7 +199,7 @@ class ClassList:
                     return os.startfile(target) if hasattr(os, 'startfile') else __import__('subprocess').run(['open', target])
                 # 内存读取预览文本逻辑 显示内容+正则搜索
                 key = "class_list_preview"
-                rec = self.win_size.setup(win := tk.Toplevel(cw), key, f"600x500+{self.root.winfo_x()+60}+{self.root.winfo_y()+50}", mode='cascade')
+                rec = self.win_size.setup(win := tk.Toplevel(cw), key, f"600x500+{self.root.winfo_x()-300}+{self.root.winfo_y()+50}", mode='cascade')
                 win.bind('<Configure>', rec, add='+')
                 win.protocol("WM_DELETE_WINDOW", win.destroy); win.focus_force()
                 state = {"current_file": p, "search_results": [], "search_index": -1, "last_q": None} # 状态存储 (用于搜索)
@@ -217,6 +222,7 @@ class ClassList:
                 ttk.Checkbutton(sf, text="全局匹配", variable=global_search_var, command=lambda: do_find(reset=True)).pack(side="left", padx=5)
                 sl = ttk.Label(sf, text="0/0"); sl.pack(side="right", padx=5)
                 [ttk.Button(sf, text=t, width=3, command=lambda r=v: do_find(rev=r)).pack(side="right") for t, v in [("↓", 0), ("↑", 1)]]
+                # wrap="word"可能会造成卡顿 下面换行逻辑暂时解决了 不过还是留个注释 可改为wrap="char"减轻渲染压力
                 txt = tk.Text(win, font=('Consolas', 10), wrap="word")
                 sv = ttk.Scrollbar(win, command=txt.yview); txt.config(yscrollcommand=sv.set)
                 [f.pack(side=s, fill=y, expand=e) for f,s,y,e in [(sv,"right","y",0), (txt,"left","both",1)]]
@@ -227,6 +233,8 @@ class ClassList:
                     state["current_file"] = fpath; win.title(fpath)
                     content = (self.modified_files[fpath].decode('utf-8', 'ignore') if fpath in self.modified_files and self.modified_files[fpath] is not None else
                             zipfile.ZipFile(self.epub_path, 'r').read(fpath).decode('utf-8', 'ignore') if fpath in zipfile.ZipFile(self.epub_path, 'r').namelist() else "")
+                    # 为极长的标签块换行 大幅降低wrap="word"的渲染压力
+                    content = re.sub(r'(</(?:div|p|h[1-6]|ul|ol|li|section|html|body|table)>)\s*', r'\1\n', content, flags=re.I)
                     txt.config(state="normal"); txt.delete("1.0", "end"); txt.insert("1.0", content); txt.config(state="disabled")
                     [(ftree.selection_set(n), ftree.see(n)) for n in self.n_map.values() if n and ftree.exists(n) and ftree.item(n, "tags")[0] == fpath]
 
@@ -251,16 +259,18 @@ class ClassList:
                     state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(state["search_results"]) if not reset else state["search_index"]
                     target = state["search_results"][state["search_index"]]
                     if target["path"] != state["current_file"]: load_content_to_text(target["path"])
-                    # 批量高亮所有匹配项
-                    s_idx, cv = "1.0", tk.IntVar()
-                    while (s_idx := txt.search(q, s_idx, "end", count=cv, regexp=True)): 
-                        txt.tag_add("m", s_idx, (e_idx := f"{s_idx}+{cv.get()}c")); s_idx = e_idx
+                    # 分批高亮所有匹配项 txt.search改用re以支持\b等高级正则
+                    ms, m_rs = list(re.finditer(q, txt.get("1.0", "end-1c"))), []
+                    for m in ms:
+                        m_rs.extend((f"1.0+{m.start()}c", f"1.0+{m.end()}c"))
+                        if len(m_rs) >= 1000: txt.tag_add("m", *m_rs); m_rs.clear() # 500个匹配项一批 分批渲染
+                    if m_rs: txt.tag_add("m", *m_rs)
                     # 高亮并跳转到当前特定匹配项
-                    m_idx, s_idx = sum(1 for i in range(state["search_index"]) if state["search_results"][i]["path"] == target["path"]), "1.0"
-                    for _ in range(m_idx + 1): 
-                        if not (s_idx := txt.search(q, s_idx, "end", count=cv, regexp=True)): break
-                        if _ == m_idx: (txt.tag_add("cur", s_idx, (nxt := f"{s_idx}+{cv.get()}c")), txt.see(s_idx))
-                        s_idx = f"{s_idx}+{cv.get()}c"
+                    m_idx = sum(1 for i in range(state["search_index"]) if state["search_results"][i]["path"] == target["path"])
+                    if m_idx < len(ms):
+                        m = ms[m_idx]
+                        txt.tag_add("cur", (s_idx := f"1.0+{m.start()}c"), f"1.0+{m.end()}c")
+                        txt.see(s_idx)
                     sl.config(text=f"{state['search_index'] + 1}/{len(state['search_results'])}")
 
                 # 批量绑定快捷键：左右键切换文件，上下键切换搜索结果，输入框自动防抖搜索
@@ -303,50 +313,116 @@ class ClassList:
                         if (idref := itemref.get("idref")) and idref in manifest}
             except: return {}
 
+        # 解析单个HTML文件的函数（子线程执行：纯计算，无UI操作）
+        def _parse_html_file(file_content_bytes, filename):
+            results = {'counts': {}, 'samples': {}, 'class_tags': [], 'img_counts': {}}
+            try:
+                import posixpath # 性能优于pathlib 且强制使用正斜杠符合epub规范
+                root = lxml.html.fromstring(file_content_bytes)
+                base_dir = posixpath.dirname(filename)
+                # XPath 一次遍历提取class、img、svg、image的标签
+                for el in root.xpath('//*[@class] | //img | //*[(local-name()="image")]'):
+                    tag = el.tag.rsplit('}', 1)[-1].lower()
+                    # 处理图片路径
+                    if tag in ('img', 'image'):
+                        # 兼容src、href、xlink:href等属性
+                        src = el.get('src') or el.get('href') or el.get('xlink:href') or el.get('{http://www.w3.org/1999/xlink}href')
+                        if src and not src.startswith(('http', 'data:')):
+                            # 规范化路径，处理 ../ 符号并去掉 URL 参数/锚点
+                            clean_src = src.split('#')[0].split('?')[0]
+                            abs_p = posixpath.normpath(posixpath.join(base_dir, clean_src))
+                            results['img_counts'][abs_p] = results['img_counts'].get(abs_p, 0) + 1
+                    # 处理包含class的节点（这里不使用elif，因为img也可能带有class）
+                    if cls_str := el.get('class'):
+                        cls_list = cls_str.split()
+                        s_raw = ""
+                        # 性能优化：在子线程预先判断是否需要提取实例字符串
+                        if any(len(self.samples_data.get(c, [])) < 15 for c in cls_list):
+                            s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
+                        for c in cls_list:
+                            results['counts'][c] = results['counts'].get(c, 0) + 1
+                            results['class_tags'].append((c, tag))
+                            if s_raw and len(results['samples'].get(c, [])) < 15: # 每个class仅收集前15个实例，避免过度内存占用
+                                results['samples'].setdefault(c, []).append((filename, re.sub(r'\s+', ' ', s_raw)[:150]))
+            except Exception as e:
+                logger.error(f"解析 {filename} 出错: {e}")
+            return results
+
+        # 合并解析结果到主数据结构（主线程执行：包含UI更新）
+        def _merge_results(results):
+            # 同步更新左侧文件树的图片计数
+            for p, cnt in results.get('img_counts', {}).items():
+                self.img_counts[p] = self.img_counts.get(p, 0) + cnt
+                if p in self.n_map and ftree.exists(self.n_map[p]):
+                    ftree.item(self.n_map[p], values=(f"{self.img_counts[p]}",))
+
+            for c, cnt in results['counts'].items():
+                self.counts_data[c] = self.counts_data.get(c, 0) + cnt
+                # 处理html提取的class数据 (保留原码判断逻辑与Treeview更新)
+                for tag in [t for cls, t in results['class_tags'] if cls == c]:
+                    [ (self.cats[k].add(c), key := (k, c),
+                       tree.item(class_to_iid[key], values=(self.counts_data[c],)) if key in class_to_iid else
+                       (class_to_iid.update({key: tree.insert(nodes[k], "end", text=c, values=(self.counts_data[c],))}),
+                        self.all_items_refs.append((k, c, class_to_iid[key])),
+                        # 字母顺序重排
+                        ch := sorted(tree.get_children(nodes[k]), key=lambda x: tree.item(x, 'text').lower()),
+                        [tree.move(child, nodes[k], idx) for idx, child in enumerate(ch)]))
+                      for k, v in [('Class列表', 1), ('Span列表', tag=='span'), ('图片Class列表', tag=='img'), 
+                                   ('非P标签列表', tag!='p'), ('非P、img、body标签列表', tag not in ['p','img','body'])] if v ]
+                    break # 每个class在一次结果合并中只更新一次分类树
+            for c, s_list in results['samples'].items():
+                if len(self.samples_data.get(c, [])) < 15: # 仅在样本不足时合并，避免过度覆盖
+                    self.samples_data.setdefault(c, []).extend(s_list[:15 - len(self.samples_data.get(c, []))])
+
         # 构建epub文件树 提取样式和实例数据
         def parse_gen():
             with zipfile.ZipFile(self.epub_path, 'r') as z:
-                spine= get_opf_spine_order(z)
+                spine = get_opf_spine_order(z)
                 def sort_key(p):
                     low = p.lower()
                     # 语义权重：HTML(0) > CSS(1) > ncx/opf/xml(2) > 其他(3)
                     w = 0 if low.endswith(('.html', '.xhtml')) else 1 if low.endswith('.css') else 2 if low.endswith(('.ncx', '.opf', '.xml')) else 3
                     return (not p.endswith('/'), w, (0, spine.get(p, 0)) if w == 0 else (1, low))
                 nl = sorted(z.namelist(), key=sort_key)
+                # 构建文件树
                 [ (parts := p.split('/'), [ (cur := "/".join(parts[:i+1]), pre := "/".join(parts[:i]), 
                    cur not in self.n_map and self.n_map.update({cur: ftree.insert(self.n_map[pre], "end", text=cur, 
                    tags=(cur if (i==len(parts)-1 and not p.endswith('/')) else cur+"/",))}),
                    (i < len(parts)-1) and ftree.item(self.n_map[cur], open=True) # 直接赋值True 列表全部展开
                   ) for i in range(len(parts) - (1 if p.endswith('/') else 0))]) for p in nl ]
                 yield
-                for f in nl:
+
+                css_files = [f for f in nl if f.endswith('.css')]
+                html_files = [f for f in nl if f.endswith(('.html', '.xhtml'))]
+                # 提取css样式
+                for f in css_files:
                     if not self._running: return
-                    # 提取css样式
-                    if f.endswith('.css'):
-                        b_txt = z.read(f).decode('utf-8', 'ignore')
-                        [[self.style_data.setdefault(c, {}).setdefault(f, []).append({'selector': p, 'content': re.sub(r';\s*', ';\n  ', b.strip())})
-                          for p in [s.strip() for s in sel.split(',')]
-                          for m in re.findall(r'(?:\.([\w-]+))|(?:\b([a-zA-Z1-6]+)\b)', p)
-                          for c in m if c] for sel, b in re.findall(r'([^{]+)\{([^}]+)\}', re.sub(r'/\*.*?\*/', '', b_txt, flags=re.DOTALL))]
-                    # 处理xhtml 使用 XPath 仅提取带 class 的标签
-                    elif f.endswith(('.html', '.xhtml')):
-                        for el in lxml.html.fromstring(z.read(f)).xpath('//*[@class]'):
-                            tag, cls_list = el.tag.rsplit('}', 1)[-1].lower(), el.get('class').split()
-                            for c in cls_list:
-                                self.counts_data[c] = self.counts_data.get(c, 0) + 1
-                                [ (self.cats[k].add(c), key := (k, c),
-                                   tree.item(class_to_iid[key], values=(self.counts_data[c],)) if key in class_to_iid else
-                                   (class_to_iid.update({key: tree.insert(nodes[k], "end", text=c, values=(self.counts_data[c],))}),
-                                    self.all_items_refs.append((k, c, class_to_iid[key])),
-                                    # 字母顺序重排
-                                    ch := sorted(tree.get_children(nodes[k]), key=lambda x: tree.item(x, 'text').lower()),
-                                    [tree.move(child, nodes[k], idx) for idx, child in enumerate(ch)]))
-                                  for k, v in [('Class列表', 1), ('Span列表', tag=='span'), ('图片Class列表', tag=='img'), 
-                                               ('非P标签列表', tag!='p'), ('非P、img、body标签列表', tag not in ['p','img','body'])] if v ]
-                                if len(self.samples_data.get(c, [])) < 15: # 提取15个实例
-                                    s_raw = lxml.html.tostring(el, encoding='unicode', method='html', with_tail=False).strip()
-                                    self.samples_data.setdefault(c, []).append((f, re.sub(r'\s+', ' ', s_raw)[:150]))
-                        yield
+                    b_txt = z.read(f).decode('utf-8', 'ignore')
+                    [[self.style_data.setdefault(c, {}).setdefault(f, []).append({'selector': p, 'content': re.sub(r';\s*', ';\n  ', b.strip())})
+                      for p in [s.strip() for s in sel.split(',')]
+                      for m in re.findall(r'(?:\.([\w-]+))|(?:\b([a-zA-Z1-6]+)\b)', p)
+                      for c in m if c] for sel, b in re.findall(r'([^{]+)\{([^}]+)\}', re.sub(r'/\*.*?\*/', '', b_txt, flags=re.DOTALL))]
+                    yield
+
+                # 多线程动态分发处理html
+                max_workers = int(w) if (w := self.workers_cfg) != 'Auto' else max(2, min(os.cpu_count() or 2, 8)) # 读取配置 自动(最低2最高8)或手动的线程数
+                all_tasks = [] # 主线程预读字节流 规避ZipFile线程锁.准备动态分发
+                for f in html_files:
+                    try: all_tasks.append((z.read(f), f))
+                    except: pass
+                # 按线程动态分发任务.子线程仅负责解析 按文件独立提交.主线程负责结果合并和UI更新
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    fs = {executor.submit(_parse_html_file, data, name): name for data, name in all_tasks}
+                    count = 0
+                    for future in as_completed(fs):
+                        if not self._running: break
+                        res = future.result()
+                        if res: _merge_results(res) # 回主线程合并数据并更新UI
+                        # 10%的任务完成率刷新一次UI，保持界面响应性
+                        count += 1
+                        if count % 10 == 0:
+                            yield
+                yield # 每批次完成后交还UI控制权
         gen = parse_gen()
         def run_step(): # 递归调用生成器分步处理
             if self._running:
@@ -359,7 +435,7 @@ class ClassList:
         def show_details(event=None):
             if not (item := (tree.identify_row(event.y) if event else (tree.selection() or [None])[0])) or item in nodes.values(): return
             win = tk.Toplevel(cw)
-            rec = self.win_size.setup(win, "class_list_details", f"500x480+{self.root.winfo_x()+140}+{self.root.winfo_y()+80}", mode='cascade')
+            rec = self.win_size.setup(win, "class_list_details", f"500x480+{self.root.winfo_x()+320}+{self.root.winfo_y()-20}", mode='cascade')
             win.bind('<Configure>', rec, add='+')
             win.protocol("WM_DELETE_WINDOW", win.destroy); win.focus_force()
             # 获取下一个节点的 lambda，用于左右键切换
