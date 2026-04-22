@@ -3,9 +3,9 @@
 epub_ncx_generator.py #生成toc.ncx 转epub2.0 修正目录偏移 补全后记 更新opf信息 移除nav.xhtml
 regex_manager.py #管理正则表达式规则和工具提示
 tooltip.py #提供GUI元素的悬浮提示功能
-class_list.py #HTML class分析工具 文件树/拖拽/预览/搜索
+class_list.py #HTML class分析工具 文件树/拖拽/预览/搜索 多线程解析/图片统计
 Image.py #图标资源(Base64编码)
-image_converter.py/exe #处理图片格式转换
+image_converter.py/exe #处理图片格式转换 自动旋转
 
 
 1. EpubProcessor.__init__（初始化界面）
@@ -21,7 +21,9 @@ image_converter.py/exe #处理图片格式转换
        - 生成ncx并更新opf(generate_ncx_enabled + 偏移/强制偏移/补全后记)
        - 转Epub2.0并删除nav.xhtml(convert_epub_version_enabled)
        - 转换图片(convert_images_var + 参数配置)
-       - 语言标识(set_lang_enabled + 语言参数)
+         - 自动旋转(override_count_var + override_skip_var + override_param_var)
+       - 语言标识(set_lang_enabled + 语言参数 + max_workers_var并发数)
+       - 清理首部空行(remove_head_blank_enabled)
      * 初始化RegexManager组件：
        - 从config.ini加载用户自定义正则规则
        - 若无配置则创建默认规则(清理body/div/p标签样式等)
@@ -29,7 +31,7 @@ image_converter.py/exe #处理图片格式转换
      * 绑定规则保存按钮到主程序保存方法
      * 初始化批量转换按钮和单文件处理功能
      * 初始化辅助功能按钮：
-       - 样式收集分析(show_class_list): 扫描EPUB中使用的CSS类，支持拖拽/预览/搜索
+       - 样式收集分析(show_class_list): 扫描EPUB中使用的CSS类，多线程解析/图片统计，支持拖拽/预览/搜索
        - 排除合并(show_exclude_dialog): 设置不合并的章节，支持正则追加分割章节
        - 重置设置(reset_app_settings): 恢复默认配置，右键清理内存winsize
      * 加载应用设置(load_app_settings)
@@ -39,58 +41,70 @@ image_converter.py/exe #处理图片格式转换
    - 用户选择输入EPUB文件
    - 支持拖拽epub到窗口
 
-3. EpubProcessor.process_epub（核心处理流程）
-   1) 解压EPUB到临时目录(sesame_cache)
-   2) 解析container.xml获取OPF路径(_get_opf_path)
-   3) 图片转换(可选)：convert_epub_images
-      - 扫描图片文件
-      - 使用image_converter.exe转换格式
-      - 更新HTML图片引用
-      - 清理旧图片
-      - 更新OPF媒体类型
-   4) 处理OPF文件和样式表：process_opf_and_styles
-      - 删除自带Style并添加自定义样式表
-      - 设置语言标识(opf/head)
-      - 规格化头部信息
-   5) 生成ncx并更新opf：EpubNCXGenerator.generate_ncx
-      - 基于NAV构建层级目录
-      - 生成toc.ncx文件
-   6) 修正ncx路径：EpubNCXGenerator.fix_ncx_paths
-      - 目录偏移(检测文件不存在时自动-1修正)
-      - 强制偏移(手动设置偏移值)
-      - 补全后记(自动补全缺失的あと古迹条目)
-   7) 转Epub2.0并删除nav.xhtml(可选)：EpubNCXGenerator.convert_to_epub2
-      - 修改package声明为version="2.0"
-      - 删除epub3.0的prefix属性
-      - 移除nav.xhtml文件
-   8) 正则追加、分割章节(可选)
-      - 重新解析目录(_parse_toc)
-      - 正则匹配追加新章节(_apply_regex_split)
-   9) 章节间合并(可选)：merge_xhtml_files
-      - 解析OPF获取spine顺序和目录结构
-      - 根据目录条目确定合并范围
-      - 添加分隔符(双br标签夹hr标签)
-      - 更新OPF，移除已合并文件引用
-      - 支持排除特定目录条目
-   10) 遍历所有xhtml/html文件处理：
-       a. Ruby格式规格化：process_ruby
-          - 合并连续的ruby标签
-          - 提取<img>标签到Ruby外部
-          - 合并多个<rt>内容
-          - 清理多余的rb标签
-       b. 傍点转ruby：modify_html
-          - 转换class指定的<span>/<em>为<ruby>
-          - 创建rt标签并添加"・"
-       c. 正则替换：regex_manager.apply_rules
-          - 按顺序应用每条正则规则
-       d. 图片标签多看交互规格化：post_process_images
-          - div/p包裹的图片规格化
-          - svg和ops:switch标签兼容
-          - 排除span跟gaiji标签
-   11) 空行处理：process_blank_lines
-       - 删除指定数量的空行
-       - 限制连续空行的最大数量
-   12) 重新打包EPUB
+3. EpubProcessor.process_epub（核心处理流程）- 分为三个阶段
+   - Phase 1: 结构级操作(单线程)
+     1) 解压EPUB到临时目录(sesame_cache)
+     2) 解析container.xml获取OPF路径(_get_opf_path)
+     3) 图片转换(可选)：convert_epub_images
+        - 扫描图片文件
+        - 使用image_converter.exe转换格式
+        - 自动旋转：超过阈值追加覆盖参数(-r -R)
+        - 更新HTML图片引用
+        - 清理旧图片
+        - 更新OPF媒体类型
+     4) 处理OPF文件和样式表：process_opf_and_styles
+        - 删除自带Style并添加自定义样式表
+        - 设置语言标识(opf/head)
+        - 规格化头部信息
+     5) 生成ncx并更新opf：EpubNCXGenerator.generate_ncx
+        - 基于NAV构建层级目录
+        - 生成toc.ncx文件
+     6) 修正ncx路径：EpubNCXGenerator.fix_ncx_paths
+        - 目录偏移(检测文件不存在时自动-1修正)
+        - 强制偏移(手动设置偏移值)
+        - 补全后记(自动补全缺失的あと古迹条目)
+     7) 转Epub2.0并删除nav.xhtml(可选)：EpubNCXGenerator.convert_to_epub2
+        - 修改package声明为version="2.0"
+        - 删除epub3.0的prefix属性
+        - 移除nav.xhtml文件
+     8) 正则追加、分割章节(可选)
+        - 重新解析目录(_parse_toc)
+        - 正则匹配追加新章节(_apply_regex_split)
+     9) 章节间合并(可选)：merge_xhtml_files
+        - 解析OPF获取spine顺序和目录结构
+        - 根据目录条目确定合并范围
+        - 添加分隔符(双br标签夹hr标签)
+        - 更新OPF，移除已合并文件引用
+        - 支持排除特定目录条目
+
+   - Phase 2: 单页内容级操作(多进程流水线)
+     10) 多进程核心流水线处理(mp_process_single_file_pipeline)
+         - 使用ProcessPoolExecutor并行处理(max_workers通过UI配置/Auto最高8)
+         - psutil降级子进程优先级
+         a. 首次BS4解析并规格化头部信息(mp_normalize_xhtml_header)
+            - 规格化HTML属性(xmlns/xmlns:epub/xml:lang)
+            - 重建Head信息(title/link)
+         b. Ruby格式规格化：mp_process_ruby
+            - 合并连续的ruby标签
+            - 提取<img>标签到Ruby外部
+            - 合并多个<rt>内容
+            - 清理多余的rb标签
+         c. 傍点转ruby：mp_modify_html
+            - 转换class指定的<span>/<em>为<ruby>
+            - 创建rt标签并添加"・"
+         d. 正则替换：按顺序应用每条正则规则
+         e. 二次BS4解析兜底纠错
+         f. 图片标签多看交互规格化：mp_post_process_images
+            - div/p包裹的图片规格化
+            - svg和ops:switch标签兼容
+            - 排除span跟gaiji标签
+         g. 空行处理：mp_process_blank_lines
+            - 删除指定数量的空行
+            - 限制连续空行的最大数量
+            - 清理首部空行(remove_head_blank)
+
+   - Phase 3: 收尾与重打包
+     11) 重新打包EPUB
 
 4. EpubNCXGenerator.generate_ncx（生成NCX）
    - 基于NAV构建层级目录(_parse_nav递归解析列表)
@@ -121,12 +135,15 @@ image_converter.py/exe #处理图片格式转换
    - 扫描EPUB中所有图片文件
    - 使用image_converter.exe转换图片格式
    - 参数配置：-f格式 -q质量 -H/-W高宽 -s锐化 -A透明 -w线程 -m压缩等级
+   - 自动旋转(-r -R)用于罫線图片
+   - 正则排除(gaiji|cover)
    - 更新HTML文件中的图片引用
    - 清理旧图片文件
    - 更新OPF清单中的媒体类型
 
 9. EpubProcessor.batch_convert_epubs（批量转换）
    - 选择多个EPUB文件
+   - 后台线程执行避免UI阻塞
    - 为每个文件创建输出目录(output)
    - 依次处理每个EPUB文件
    - 保存转换结果到输出目录
@@ -146,6 +163,8 @@ image_converter.py/exe #处理图片格式转换
 11. 辅助功能
     - 样式收集分析(show_class_list)
       * 扫描EPUB中使用的CSS类
+      * 多线程动态分发解析(ThreadPoolExecutor)
+      * 统计图片使用次数(xlink:href兼容)
       * 文件树浏览，支持拖入拖出导出导入
       * 预览文件内容，支持正则匹配搜索
       * 显示样式定义详情和实例
