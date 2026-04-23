@@ -839,7 +839,10 @@ class EpubProcessor:
         opf = self._get_opf_path(temp_path)
         EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
         
-        self._toc_source_var = tk.StringVar(value="nav")
+        # 提前解析并动态判断初始下拉框状态
+        opf_soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
+        has_nav = bool(opf_soup.find('item', properties='nav'))
+        self._toc_source_var = tk.StringVar(value="nav" if has_nav else "ncx")
         self._current_base_dir = opf.parent # 动态基准目录初始化
         
         def update_base_dir(src, soup):
@@ -848,7 +851,6 @@ class EpubProcessor:
             elif src == 'ncx' and (it := soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})): self._current_base_dir = (opf.parent / it['href']).parent
             else: self._current_base_dir = opf.parent
 
-        opf_soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
         update_base_dir(self._toc_source_var.get(), opf_soup)
         self._init_toc, self._curr_toc = (t := self._parse_toc(opf_soup, opf, priority=self._toc_source_var.get())), t.copy()
         if not t: return messagebox.showwarning("警告", "未找到目录条目")
@@ -903,8 +905,8 @@ class EpubProcessor:
         def add_row(txt="", level=2):
             row = ttk.Frame(reg_frame); row.pack(fill="x", pady=1)
             cb = ttk.Combobox(row, values=("层级2(子章节)", "层级1(同级)"), state="readonly", width=12)
-            cb.pack(side="left", padx=2); cb.set("层级2(子章节)" if level == 2 else "层级1(同级)")
-            en = tk.Entry(row); en.pack(side="left", fill="x", expand=True, padx=2); en.insert(0, txt); regex_entries.append((cb, en))
+            cb.pack(side="left"); cb.set("层级2(子章节)" if level == 2 else "层级1(同级)")
+            en = tk.Entry(row); en.pack(side="left", fill="x", expand=True, padx=3); en.insert(0, txt); regex_entries.append((cb, en))
             m = tk.Menu(dialog, tearoff=0); m.add_command(label="新增正则框", command=add_row)
             m.add_command(label="删除正则条目", command=lambda: [row.destroy(), regex_entries.remove((cb, en)), run_splits()] if len(regex_entries)>1 else [en.delete(0, 'end'), run_splits()])
             m.add_command(label="粘贴并预览", command=lambda: [en.delete(0, 'end'), en.insert(0, dialog.clipboard_get()), run_splits()])
@@ -914,8 +916,8 @@ class EpubProcessor:
         # 底部按钮
         btn_frame = ttk.Frame(dialog); btn_frame.pack(side="bottom", fill="x", pady=10)
         # 使用 place 绝对定位下拉框，不占用 pack 的分配空间，确保 buttons 真正居中
-        src_cb = ttk.Combobox(btn_frame, textvariable=self._toc_source_var, values=("nav", "ncx"), state="readonly", width=4)
-        src_cb.place(x=10, rely=0.5, anchor="w"); src_cb.bind("<<ComboboxSelected>>", lambda e: reload_toc())
+        src_cb = ttk.Combobox(btn_frame, textvariable=self._toc_source_var, values=("nav", "ncx"), state="readonly", width=3)
+        src_cb.place(x=5, rely=0.5, anchor="w"); src_cb.bind("<<ComboboxSelected>>", lambda e: reload_toc())
         
         inner_box = ttk.Frame(btn_frame); inner_box.pack(anchor="center")
         ttk.Button(inner_box, text="预览全部正则追加、分割章节", command=run_splits).pack(side="left", padx=5)
