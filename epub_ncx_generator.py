@@ -74,8 +74,8 @@ class EpubNCXGenerator:
             # 寻找 EPUB 根目录（包含 mimetype 文件的目录，若无则默认为 OPF 所在目录）
             epub_root = next((p for p in opf_path.parents if (p / 'mimetype').exists()), opf_path.parent)
 
-            # 递归删除 EPUB 根目录下所有 .bw 和 .js 文件
-            for ext in ['*.bw', '*.js']:
+            # 递归删除 EPUB 根目录下所有 .bw .js rights.xml文件
+            for ext in ['*.bw', '*.js', 'rights.xml']:
                 for extra_file in epub_root.rglob(ext):
                     extra_file.unlink()
                     logger.debug(f"已删除 {extra_file.suffix[1:]} 文件: {extra_file}")
@@ -292,7 +292,7 @@ class EpubNCXGenerator:
             if shift:
                 l_t = (BeautifulSoup(ncx_text, 'xml').find_all('navPoint') or [None])[-1]
                 lbl = l_t.find('navLabel').text.strip() if l_t and l_t.find('navLabel') else ""
-                logger.warning(f"强制目录{m_v}偏移,目录最后一条: {lbl} | ({last_f})" if m_v else 
+                logger.warning(f"强制目录{m_v:+}偏移,目录最后一条: {lbl} | ({last_f})" if m_v else 
                                f"目录最后一条文件不存在: {lbl} | ({last_f}) 全部目录批量-1修正")
                 def offset_src(m):
                     nonlocal any_changed
