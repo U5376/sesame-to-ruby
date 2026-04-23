@@ -647,8 +647,9 @@ class EpubProcessor:
             raise ValueError("未找到 .opf 文件路径")
         return Path(temp_dir) / rootfile['full-path']
 
-    def _parse_toc(self, opf_soup, opf_path):
+    def _parse_toc(self, opf_soup, opf_path, priority='nav'):
         """解析目录结构 优先nav 后解析ncx"""
+        nav_res, ncx_res = [], []
         # nav
         if (nav_item := opf_soup.find('item', properties='nav')) and (nav_path := (opf_path.parent / nav_item['href']).resolve()).exists():
             with nav_path.open('r', encoding='utf-8') as f:
@@ -656,7 +657,7 @@ class EpubProcessor:
             if (nav_tag := nav_soup.find('nav', attrs={'epub:type': 'toc'}) or 
                         nav_soup.find('nav', attrs={'role': 'doc-toc'}) or
                         nav_soup.find('nav', id='toc')):
-                return [
+                nav_res = [
                     {'title': a.text.strip(), 'href': a['href'].split('#')[0], 
                      'depth': len(a.find_parents('li')) - 1}
                     for a in nav_tag.find_all('a', href=True)]
@@ -665,11 +666,11 @@ class EpubProcessor:
             with ncx_path.open('r', encoding='utf-8') as f:
                 ncx_soup = BeautifulSoup(f.read(), 'xml')
             if nav_map := ncx_soup.find('navMap'):
-                return [
+                ncx_res = [
                     {'title': nav_point.find('navLabel').text.strip(), 'href': nav_point.find('content')['src'],
                      'depth': len(nav_point.find_parents('navPoint'))}
                     for nav_point in nav_map.find_all('navPoint')]
-        return []
+        return (nav_res or ncx_res) if priority == 'nav' else (ncx_res or nav_res)
 
     def convert_epub_images(self, temp_dir):
         """集成图片转换、清理旧文件、更新引用"""
@@ -837,7 +838,19 @@ class EpubProcessor:
         with zipfile.ZipFile(self.epub_path) as z: [z.extract(n, temp_path) for n in z.namelist() if n.lower().endswith(('.opf', '.ncx', '.xml', '.html', '.xhtml', '.htm'))]
         opf = self._get_opf_path(temp_path)
         EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
-        self._init_toc, self._curr_toc = (t := self._parse_toc(BeautifulSoup(opf.read_text("utf-8"), "xml"), opf)), t.copy()
+        
+        self._toc_source_var = tk.StringVar(value="nav")
+        self._current_base_dir = opf.parent # 动态基准目录初始化
+        
+        def update_base_dir(src, soup):
+            """根据选中的目录源（nav/ncx）动态计算其在临时目录中的真实基准路径"""
+            if src == 'nav' and (it := soup.find('item', properties='nav')): self._current_base_dir = (opf.parent / it['href']).parent
+            elif src == 'ncx' and (it := soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})): self._current_base_dir = (opf.parent / it['href']).parent
+            else: self._current_base_dir = opf.parent
+
+        opf_soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
+        update_base_dir(self._toc_source_var.get(), opf_soup)
+        self._init_toc, self._curr_toc = (t := self._parse_toc(opf_soup, opf, priority=self._toc_source_var.get())), t.copy()
         if not t: return messagebox.showwarning("警告", "未找到目录条目")
 
         # 2. UI 构建
@@ -861,7 +874,8 @@ class EpubProcessor:
             for idx, e in enumerate(self._curr_toc):
                 t, h = e.get('title', ''), e['href']
                 fn = unquote(h.split('#')[0]).split('/')[-1]
-                p_ex = (opf.parent / unquote(h.split('#')[0])).exists()
+                # 基于动态基准目录判定文件是否存在
+                p_ex = (self._current_base_dir / unquote(h.split('#')[0])).exists()
                 # 判定：路径不存在的文件用mis 不在spine内用warn
                 tag = ("mis",) if "_spt_" not in h and not p_ex else (("warn",) if "_spt_" not in h and fn not in sn else ())
                 pre = "[!路径文件不存在] " if tag == ("mis",) else ("[!spine列表内不存在] " if tag == ("warn",) else "")
@@ -875,6 +889,15 @@ class EpubProcessor:
             patterns = [r[0] for r in self._split_rules]
             if patterns and (nt := self._internal_split_logic(patterns, self._curr_toc, temp_path, self._split_rules)): self._curr_toc = nt
             refresh()
+        def reload_toc():
+            src = self._toc_source_var.get()
+            if src == 'ncx':
+                soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
+                if not soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"}): EpubNCXGenerator.generate_ncx(str(opf)); EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
+            soup = BeautifulSoup(opf.read_text("utf-8"), "xml"); update_base_dir(src, soup)
+            if (new_t := self._parse_toc(soup, opf, priority=src)): self._init_toc, self._curr_toc = new_t, new_t.copy(); run_splits()
+            else: messagebox.showwarning("警告", f"未找到有效的 {src} 目录条目")
+
         # 正则输入区
         regex_entries, reg_frame = [], ttk.Frame(dialog); reg_frame.pack(fill="x", padx=5)
         def add_row(txt="", level=2):
@@ -890,6 +913,10 @@ class EpubProcessor:
         [add_row(r, getattr(self, "_saved_regex_levels", [])[i] if len(getattr(self, "_saved_regex_levels", [])) > i else 2) for i, r in enumerate(getattr(self, "_saved_regex_list", []) or [""])]; run_splits()
         # 底部按钮
         btn_frame = ttk.Frame(dialog); btn_frame.pack(side="bottom", fill="x", pady=10)
+        # 使用 place 绝对定位下拉框，不占用 pack 的分配空间，确保 buttons 真正居中
+        src_cb = ttk.Combobox(btn_frame, textvariable=self._toc_source_var, values=("nav", "ncx"), state="readonly", width=4)
+        src_cb.place(x=10, rely=0.5, anchor="w"); src_cb.bind("<<ComboboxSelected>>", lambda e: reload_toc())
+        
         inner_box = ttk.Frame(btn_frame); inner_box.pack(anchor="center")
         ttk.Button(inner_box, text="预览全部正则追加、分割章节", command=run_splits).pack(side="left", padx=5)
         def on_confirm():
