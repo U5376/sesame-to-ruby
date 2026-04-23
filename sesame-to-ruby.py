@@ -837,20 +837,19 @@ class EpubProcessor:
 
         with zipfile.ZipFile(self.epub_path) as z: [z.extract(n, temp_path) for n in z.namelist() if n.lower().endswith(('.opf', '.ncx', '.xml', '.html', '.xhtml', '.htm'))]
         opf = self._get_opf_path(temp_path)
+        # 不存在则生成ncx，统一处理 nav/ncx 的修复与补全
+        EpubNCXGenerator.generate_ncx(str(opf))
         EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
-        
-        # 提前解析并动态判断初始下拉框状态
         opf_soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
+        # 如果存在nav则优先显示nav 否则使用ncx
         has_nav = bool(opf_soup.find('item', properties='nav'))
         self._toc_source_var = tk.StringVar(value="nav" if has_nav else "ncx")
         self._current_base_dir = opf.parent # 动态基准目录初始化
-        
         def update_base_dir(src, soup):
-            """根据选中的目录源（nav/ncx）动态计算其在临时目录中的真实基准路径"""
+            # 根据选中的目录源nav/ncx 动态计算基准路径
             if src == 'nav' and (it := soup.find('item', properties='nav')): self._current_base_dir = (opf.parent / it['href']).parent
             elif src == 'ncx' and (it := soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})): self._current_base_dir = (opf.parent / it['href']).parent
             else: self._current_base_dir = opf.parent
-
         update_base_dir(self._toc_source_var.get(), opf_soup)
         self._init_toc, self._curr_toc = (t := self._parse_toc(opf_soup, opf, priority=self._toc_source_var.get())), t.copy()
         if not t: return messagebox.showwarning("警告", "未找到目录条目")
@@ -891,12 +890,10 @@ class EpubProcessor:
             patterns = [r[0] for r in self._split_rules]
             if patterns and (nt := self._internal_split_logic(patterns, self._curr_toc, temp_path, self._split_rules)): self._curr_toc = nt
             refresh()
-        def reload_toc():
+        def reload_toc(): # 根据当前下拉框状态重新解析目录并刷新显示
             src = self._toc_source_var.get()
-            if src == 'ncx':
-                soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
-                if not soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"}): EpubNCXGenerator.generate_ncx(str(opf)); EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
-            soup = BeautifulSoup(opf.read_text("utf-8"), "xml"); update_base_dir(src, soup)
+            soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
+            update_base_dir(src, soup)
             if (new_t := self._parse_toc(soup, opf, priority=src)): self._init_toc, self._curr_toc = new_t, new_t.copy(); run_splits()
             else: messagebox.showwarning("警告", f"未找到有效的 {src} 目录条目")
 
