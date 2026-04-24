@@ -20,8 +20,8 @@ class EpubNCXGenerator:
                 if ncx_path.resolve() != target_ncx.resolve(): shutil.move(ncx_path, target_ncx)
                 logger.debug(f"已将ncx移动到根目录: {target_ncx}")
                 EpubNCXGenerator._update_opf_reference(opf_path, 'toc.ncx')
-                logger.info("toc.ncx已存在，已确保OPF引用和spine跟ncx内路径正确")
-                return True, "toc.ncx已存在，已确保OPF引用和spine跟ncx内路径正确"
+                logger.info("toc.ncx已存在，已确保OPF内引用和spine的正确")
+                return True, "toc.ncx已存在，已确保OPF内引用和spine的正确"
 
             if nav_path:
                 # 不存在ncx,解析nav文件获取目录结构并创建toc
@@ -327,47 +327,47 @@ class EpubNCXGenerator:
                 # 确保全书满足上述条件的 HTML 文件有且仅为一个
                 atokagi_file = candidates[0] if len(candidates) == 1 else None
 
-            # 补全ncx あとがき条目 (保留空条目并修复索引)
-            if ncx_text and atokagi_file and ncx_missing and (m_nav := re.search(r'(<navMap>)(.*?)(</navMap>)', ncx_text, re.DOTALL)):
-                def get_idx(h): 
-                    if not h: return -1
-                    c_h = h.split('#')[0]
-                    return spine_files.index(c_h) if c_h in spine_files else next((i for i, f in enumerate(spine_files) if Path(f).name == Path(c_h).name), -1)
+            if atokagi_file:
+                # 补全ncx あとがき条目 (保留空条目并修复索引)
+                if ncx_missing and (m_nav := re.search(r'(<navMap>)(.*?)(</navMap>)', ncx_text, re.DOTALL)):
+                    def get_idx(h): 
+                        if not h: return -1
+                        c_h = h.split('#')[0]
+                        return spine_files.index(c_h) if c_h in spine_files else next((i for i, f in enumerate(spine_files) if Path(f).name == Path(c_h).name), -1)
 
-                pts = re.findall(r'<navPoint[\s\S]*?</navPoint>', m_nav.group(2))
-                entries = [{'title': (re.search(r'<text[^>]*>(.*?)</text>', p, re.DOTALL) or [0, ""])[1].strip(),
-                            'href': (re.search(r'src="([^"]+)"', p) or [0, ""])[1]} for p in pts]
-                
-                a_idx = spine_files.index(atokagi_file)
-                ins_pos = next((i for i, e in enumerate(entries) if e['href'] and get_idx(e['href']) > a_idx), len(entries))
-                entries.insert(ins_pos, {'title': 'あとがき', 'href': atokagi_file, 'children': []})
-                
-                ncx_text = ncx_text[:m_nav.start(2)] + "\n" + "".join(EpubNCXGenerator._build_ncx_points(entries, EpubNCXGenerator.PlayOrder(1))) + "\n" + ncx_text[m_nav.end(2):]
-                any_changed = True
-                logger.success(f"ncx 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
-
-            if any_changed and ncx_path: ncx_path.write_text(ncx_text, encoding='utf-8')
-
-            # 补全nav あとがき条目
-            if nav_missing and atokagi_file:
-                nav_soup = BeautifulSoup(nav_content, 'html.parser')
-                if (toc := nav_soup.find('nav', {'epub:type': 'toc'}) or nav_soup.find('nav', {'role': 'doc-toc'})) and (root := toc.find(['ol', 'ul'])):
+                    pts = re.findall(r'<navPoint[\s\S]*?</navPoint>', m_nav.group(2))
+                    entries = [{'title': (re.search(r'<text[^>]*>(.*?)</text>', p, re.DOTALL) or [0, ""])[1].strip(),
+                                'href': (re.search(r'src="([^"]+)"', p) or [0, ""])[1]} for p in pts]
+                    
                     a_idx = spine_files.index(atokagi_file)
-                    lis = root.find_all('li', recursive=False)
-                    ins = next((li for li in lis if (a := li.find('a', href=True)) and (h := a['href'].split('#')[0]) in spine_files and spine_files.index(h) > a_idx), None)
+                    ins_pos = next((i for i, e in enumerate(entries) if e['href'] and get_idx(e['href']) > a_idx), len(entries))
+                    entries.insert(ins_pos, {'title': 'あとがき', 'href': atokagi_file, 'children': []})
                     
-                    new_li = nav_soup.new_tag('li')
-                    new_li.append(nav_soup.new_tag('a', href=atokagi_file))
-                    new_li.a.string = 'あとがき'
-                    ins.insert_before(new_li) if ins else root.append(new_li)
-                    
-                    nav_path.write_text(nav_soup.decode(formatter='html'), encoding='utf-8')
+                    ncx_text = ncx_text[:m_nav.start(2)] + "\n" + "".join(EpubNCXGenerator._build_ncx_points(entries, EpubNCXGenerator.PlayOrder(1))) + "\n" + ncx_text[m_nav.end(2):]
                     any_changed = True
-                    logger.success(f"nav 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
+                    logger.success(f"ncx 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
 
-        # 只有在 any_changed 依旧为 False 时才显示此日志
-        if not any_changed: logger.debug("ncx无需修正")
-        return True, "ncx无需修正"
+                # 补全nav あとがき条目
+                if nav_missing:
+                    nav_soup = BeautifulSoup(nav_content, 'html.parser')
+                    if (toc := nav_soup.find('nav', {'epub:type': 'toc'}) or nav_soup.find('nav', {'role': 'doc-toc'})) and (root := toc.find(['ol', 'ul'])):
+                        a_idx = spine_files.index(atokagi_file)
+                        lis = root.find_all('li', recursive=False)
+                        ins = next((li for li in lis if (a := li.find('a', href=True)) and (h := a['href'].split('#')[0]) in spine_files and spine_files.index(h) > a_idx), None)
+                        
+                        new_li = nav_soup.new_tag('li')
+                        new_li.append(nav_soup.new_tag('a', href=atokagi_file))
+                        new_li.a.string = 'あとがき'
+                        ins.insert_before(new_li) if ins else root.append(new_li)
+                        
+                        nav_path.write_text(nav_soup.decode(formatter='html'), encoding='utf-8')
+                        any_changed = True
+                        logger.success(f"nav 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
+
+        # 将文件写入逻辑移至最外层，确保路径修正、偏移和后记补全均能正常触发保存
+        if any_changed and ncx_path and ncx_text: ncx_path.write_text(ncx_text, encoding='utf-8')
+        if not any_changed: logger.debug("ncx无需修正") # 只有在any_changed依旧为False时才显示此日志
+        return True, "fix_ncx_paths完成"
 
     @staticmethod
     def insert_sub_chapters(opf_path, parent_href, sub_chapters):
