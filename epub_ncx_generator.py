@@ -316,9 +316,10 @@ class EpubNCXGenerator:
                     h for h in spine_files 
                     if (f := opf_path.parent / h).exists() 
                     and (c := f.read_text(encoding='utf-8', errors='ignore'))
-                    # 提取 body 后前 20 行
-                    and (m := re.search(r'<body[^>]*>([\s\S]*)$', c, re.I))
-                    and (zone := "\n".join(m.group(1).splitlines()[:20]))
+                    # 仅匹配body标签.避免使用[\s\S]*)$扫描全文
+                    and (m := re.search(r'<body[^>]*>', c, re.I))
+                    # 仅截取body后的2000个字符进行按行切分，提取前20行
+                    and (zone := "\n".join(c[m.end():m.end()+2000].splitlines()[:20]))
                     # 匹配逻辑：匹配任何标签内包含 あとがき 的行 (兼容独立标题和描述性标题)
                     and re.search(r'<[^>]+>[^<]*あとがき[^<]*</[^>]+>', zone)
                 ]
