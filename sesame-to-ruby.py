@@ -323,10 +323,11 @@ class EpubProcessor:
                 ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, '删除指定的空行数量'),
                 ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
             ('delete_style_enabled', '删除自带Style并添加自定义样式表', '清理原有样式跟opf竖排属性\n添加css文件及更新引用\n规格化头部信息', []),
-            ('generate_ncx_enabled', '生成ncx并更新opf', '自动对照opf列表修正路径', [
-                ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (3, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移\n只用于ncx nav没写'),
+            ('generate_ncx_enabled', '生成ncx', '没有则自动生成ncx\n确保OPF内引用和spine正确', [
+                ('ncx_path_fix_enabled', 'src修正', tk.Checkbutton, {'px': (0, 0)}, '对照opf列表自动修正ncx内src路径'),
+                ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (0, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移\n只用于ncx nav没写'),
                 ('ncx_manual_offset_val', '0', tk.Entry, {'w': 3, 'px': (0, 0)}, '强制目录偏移+ -，0不执行操作\n优先于自动偏移\n只用于ncx nav没写'),
-                ('ncx_atokagi_enabled', '补全后记', tk.Checkbutton, {'px': (3, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
+                ('ncx_atokagi_enabled', '补全后记', tk.Checkbutton, {'px': (2, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
             ('convert_epub_version_enabled', '转Epub2.0并删除nav.xhtml', '将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明', []),
             ('convert_images_var', '转换图片', '图片转换设置', [
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
@@ -454,8 +455,8 @@ class EpubProcessor:
                 success, msg = EpubNCXGenerator.generate_ncx(opf_path)
                 if not success: logger.warning(f"NCX生成警告: {msg}")
 
-            # 调用fix_ncx_paths并传递 目录偏移、强制偏移、补全あとが 开关状态
-            EpubNCXGenerator.fix_ncx_paths(opf_path, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
+            # 调用fix_ncx_paths并传递 路径修复、目录偏移、强制偏移、补全あとが 开关状态
+            EpubNCXGenerator.fix_ncx_paths(opf_path, self.ncx_path_fix_enabled.get(), self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
 
             # 转换epub版本并删除nav
             if self.convert_epub_version_enabled.get():
@@ -837,9 +838,9 @@ class EpubProcessor:
 
         with zipfile.ZipFile(self.epub_path) as z: [z.extract(n, temp_path) for n in z.namelist() if n.lower().endswith(('.opf', '.ncx', '.xml', '.html', '.xhtml', '.htm'))]
         opf = self._get_opf_path(temp_path)
-        # 不存在则生成ncx，统一处理 nav/ncx 的修复与补全
-        EpubNCXGenerator.generate_ncx(str(opf))
-        EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
+        # “生成NCX”选项控制,不存在则生成ncx，统一处理 nav/ncx 的修复与补全
+        if self.generate_ncx_enabled.get(): EpubNCXGenerator.generate_ncx(str(opf))
+        EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_path_fix_enabled.get(), self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
         opf_soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
         # 如果存在nav则优先显示nav 否则使用ncx
         has_nav = bool(opf_soup.find('item', properties='nav'))
