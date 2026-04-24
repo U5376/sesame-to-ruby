@@ -253,7 +253,7 @@ class EpubNCXGenerator:
             f.write(str(opf_soup))
 
     @staticmethod
-    def fix_ncx_paths(opf_path, offset_enabled=True, atokagi_enabled=True, manual_offset=0):
+    def fix_ncx_paths(opf_path, path_fix_enabled=True, offset_enabled=True, atokagi_enabled=True, manual_offset=0):
         """检查并修正ncx中的src路径,尝试-1修正目录，补全あとがき条目"""
         opf_path = Path(opf_path)
         opf_soup = BeautifulSoup(opf_path.read_text(encoding='utf-8'), 'xml')
@@ -271,19 +271,20 @@ class EpubNCXGenerator:
         if ncx_path and ncx_path.exists():
             ncx_text = ncx_path.read_text(encoding='utf-8')
             
-            # 检查修正ncx中src路径
-            def replace_src(m):
-                nonlocal any_changed
-                s_p, *anc = m.group(1).split('#', 1)
-                if (m_h := next((f for f in spine_files if Path(f).name == Path(s_p).name), None)) and m_h != s_p:
-                    any_changed = True
-                    logger.debug(f"修正ncx路径: {m.group(1)} -> {m_h}{'#'+anc[0] if anc else ''}")
-                    return f'src="{m_h}{"#" + anc[0] if anc else ""}"'
-                return m.group(0)
-            ncx_text = re.sub(r'src="([^"]+)"', replace_src, ncx_text)
-            if any_changed: logger.success("ncx目录路径已修正")
+            # 检查修正ncx中src路径 (受path_fix_enabled控制)
+            if path_fix_enabled:
+                def replace_src(m):
+                    nonlocal any_changed
+                    s_p, *anc = m.group(1).split('#', 1)
+                    if (m_h := next((f for f in spine_files if Path(f).name == Path(s_p).name), None)) and m_h != s_p:
+                        any_changed = True
+                        logger.debug(f"修正ncx路径: {m.group(1)} -> {m_h}{'#'+anc[0] if anc else ''}")
+                        return f'src="{m_h}{"#" + anc[0] if anc else ""}"'
+                    return m.group(0)
+                ncx_text = re.sub(r'src="([^"]+)"', replace_src, ncx_text)
+                if any_changed: logger.success("ncx目录路径已修正")
 
-            # 1.优先强制偏移,0则跳过 2.自动判断最后一条目录文件是否存在，不存在则-1修正（受offset_enabled控制）
+            # 优先强制偏移,0则跳过.自动判断最后一条目录文件是否存在，不存在则-1修正（受offset_enabled控制）
             ncx_srcs = re.findall(r'src="([^"]+)"', ncx_text)
             last_f = ncx_srcs[-1] if ncx_srcs else ""; last_src = last_f.split('#')[0]
             m_v = int(manual_offset or 0)
