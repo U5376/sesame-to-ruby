@@ -285,7 +285,7 @@ class EpubNCXGenerator:
                 if any_changed: logger.success("ncx目录路径已修正")
 
             # 优先强制偏移,0则跳过.自动判断最后一条目录文件是否存在，不存在则-1修正（受offset_enabled控制）
-            ncx_srcs = re.findall(r'src="([^"]+)"', ncx_text)
+            ncx_srcs = re.findall(r'src="([^"]+)"', (re.search(r'<navMap>([\s\S]*?)</navMap>', ncx_text, re.I) or [0, ""])[1]) #仅匹配navMap内的src
             last_f = ncx_srcs[-1] if ncx_srcs else ""; last_src = last_f.split('#')[0]
             m_v = int(manual_offset or 0)
             missing = last_src and not (opf_path.parent / last_src).exists()
