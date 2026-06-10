@@ -318,15 +318,16 @@ class EpubProcessor:
             ('modify_html_enabled', '傍点转ruby', '需要检查class', [('class_name_var', 'em-sesame|em-dot|kenten', tk.Entry, {'w': 25, 'sticky': 'ew'}, '一般class名:\nem-sesame|em-dot|kenten')]),
             ('process_ruby_enabled', 'Ruby格式规格化', '格式奇怪跟包含gaiji图片的标签规格化兼容处理', []),
             ('process_images_enabled', '图片标签多看交互规格化', '将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji', []),
-            ('merge_xhtml_enabled', 'Xhtml章节间合并', '根据目录合并章节间文件', [
+            ('merge_xhtml_enabled', 'Xhtml章节间合并', '根据目录合并章节间文件\n优先使用nav,没有则使用ncx', [
                 ('merge_separator_var', '3br', ttk.Combobox, {'w': 5, 'val': ['-','hr+br']+[f'{i}br' for i in range(1, 9)]}, '章节合并时插入的分隔符样式'),
                 ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, '删除指定的空行数量'),
                 ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
             ('delete_style_enabled', '删除自带Style并添加自定义样式表', '清理原有样式跟opf竖排属性\n添加css文件及更新引用\n规格化头部信息', []),
-            ('generate_ncx_enabled', '生成ncx并更新opf', '自动对照opf列表修正路径', [
-                ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (3, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移\n只用于ncx nav没写'),
+            ('generate_ncx_enabled', '生成ncx', '没有则自动生成ncx\n确保OPF内引用和spine正确', [
+                ('ncx_path_fix_enabled', 'src修正', tk.Checkbutton, {'px': (0, 0)}, '对照opf列表自动修正ncx内src路径'),
+                ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (0, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移\n只用于ncx nav没写'),
                 ('ncx_manual_offset_val', '0', tk.Entry, {'w': 3, 'px': (0, 0)}, '强制目录偏移+ -，0不执行操作\n优先于自动偏移\n只用于ncx nav没写'),
-                ('ncx_atokagi_enabled', '补全后记', tk.Checkbutton, {'px': (3, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
+                ('ncx_atokagi_enabled', '补全后记', tk.Checkbutton, {'px': (2, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
             ('convert_epub_version_enabled', '转Epub2.0并删除nav.xhtml', '将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明', []),
             ('convert_images_var', '转换图片', '图片转换设置', [
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
@@ -454,8 +455,8 @@ class EpubProcessor:
                 success, msg = EpubNCXGenerator.generate_ncx(opf_path)
                 if not success: logger.warning(f"NCX生成警告: {msg}")
 
-            # 调用fix_ncx_paths并传递 目录偏移、强制偏移、补全あとが 开关状态
-            EpubNCXGenerator.fix_ncx_paths(opf_path, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
+            # 调用fix_ncx_paths并传递 路径修复、目录偏移、强制偏移、补全あとが 开关状态
+            EpubNCXGenerator.fix_ncx_paths(opf_path, self.ncx_path_fix_enabled.get(), self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
 
             # 转换epub版本并删除nav
             if self.convert_epub_version_enabled.get():
@@ -596,7 +597,7 @@ class EpubProcessor:
                     and (href:=itm.get('href')) and not href.lower().endswith('nav.xhtml')]
         logger.debug(f"Spine文件列表: {spine_files}")
 
-        toc = self._parse_toc(opf_soup,opf_path)
+        toc = self._parse_toc(opf_soup,opf_path) # parse_toc决定优先使用nav
         logger.debug(f"目录条目: {toc}")
         toc_anchors=[]
         for e in toc:
@@ -647,8 +648,17 @@ class EpubProcessor:
             raise ValueError("未找到 .opf 文件路径")
         return Path(temp_dir) / rootfile['full-path']
 
-    def _parse_toc(self, opf_soup, opf_path):
+    def _parse_toc(self, opf_soup, opf_path, priority='nav'):
         """解析目录结构 优先nav 后解析ncx"""
+        nav_res, ncx_res = [], []
+        # 路径解析函数:处理nav ncx不同路径的问题,分别返回以opf为基准的相对路径，并保留可能有的锚点信息
+        def _resolve_href(base_path, raw_href):
+            # 安全分离:file_path接收纯路径.*anchors接收可能存在的锚点列表
+            file_path, *anchors = raw_href.split('#', 1)
+            # 获取绝对路径，并转为相对于opf根目录的posix规范路径
+            rel_path = (base_path.parent / file_path).resolve().relative_to(opf_path.parent.resolve()).as_posix()
+            # 结果拼接：如果有锚点则带上#拼回，否则直接返回纯路径
+            return f"{rel_path}#{anchors[0]}" if anchors else rel_path
         # nav
         if (nav_item := opf_soup.find('item', properties='nav')) and (nav_path := (opf_path.parent / nav_item['href']).resolve()).exists():
             with nav_path.open('r', encoding='utf-8') as f:
@@ -656,8 +666,9 @@ class EpubProcessor:
             if (nav_tag := nav_soup.find('nav', attrs={'epub:type': 'toc'}) or 
                         nav_soup.find('nav', attrs={'role': 'doc-toc'}) or
                         nav_soup.find('nav', id='toc')):
-                return [
-                    {'title': a.text.strip(), 'href': a['href'].split('#')[0], 
+                nav_res = [
+                    {'title': a.text.strip(), 
+                     'href': _resolve_href(nav_path, a['href']),
                      'depth': len(a.find_parents('li')) - 1}
                     for a in nav_tag.find_all('a', href=True)]
         # ncx
@@ -665,11 +676,12 @@ class EpubProcessor:
             with ncx_path.open('r', encoding='utf-8') as f:
                 ncx_soup = BeautifulSoup(f.read(), 'xml')
             if nav_map := ncx_soup.find('navMap'):
-                return [
-                    {'title': nav_point.find('navLabel').text.strip(), 'href': nav_point.find('content')['src'],
+                ncx_res = [
+                    {'title': nav_point.find('navLabel').text.strip(),
+                     'href': _resolve_href(ncx_path, nav_point.find('content')['src']),
                      'depth': len(nav_point.find_parents('navPoint'))}
                     for nav_point in nav_map.find_all('navPoint')]
-        return []
+        return (nav_res or ncx_res) if priority == 'nav' else (ncx_res or nav_res)
 
     def convert_epub_images(self, temp_dir):
         """集成图片转换、清理旧文件、更新引用"""
@@ -836,8 +848,14 @@ class EpubProcessor:
 
         with zipfile.ZipFile(self.epub_path) as z: [z.extract(n, temp_path) for n in z.namelist() if n.lower().endswith(('.opf', '.ncx', '.xml', '.html', '.xhtml', '.htm'))]
         opf = self._get_opf_path(temp_path)
-        EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
-        self._init_toc, self._curr_toc = (t := self._parse_toc(BeautifulSoup(opf.read_text("utf-8"), "xml"), opf)), t.copy()
+        # “生成NCX”选项控制,不存在则生成ncx，统一处理 nav/ncx 的修复与补全
+        if self.generate_ncx_enabled.get(): EpubNCXGenerator.generate_ncx(str(opf))
+        EpubNCXGenerator.fix_ncx_paths(opf, self.ncx_path_fix_enabled.get(), self.ncx_offset_enabled.get(), self.ncx_atokagi_enabled.get(), self.ncx_manual_offset_val.get())
+        opf_soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
+        # 如果存在nav则优先显示nav 否则使用ncx
+        has_nav = bool(opf_soup.find('item', properties='nav'))
+        self._toc_source_var = tk.StringVar(value="nav" if has_nav else "ncx")
+        self._init_toc, self._curr_toc = (t := self._parse_toc(opf_soup, opf, priority=self._toc_source_var.get())), t.copy()
         if not t: return messagebox.showwarning("警告", "未找到目录条目")
 
         # 2. UI 构建
@@ -850,8 +868,8 @@ class EpubProcessor:
         [tree.heading(c, text=t) or tree.column(c, width=w) for c, t, w in [("t", "目录 (选中不合并)", 350), ("h", "HTML文件", 150)]]
 
         def update_mem(): 
-            # 通过绑定的iid(即索引)，直接从源数据获取原始 href，避免 UI 污染
-            if tree.get_children(): self._saved_hrefs = {self._curr_toc[int(i)]['href'] for i in tree.selection()}
+            # 通过绑定的iid(即索引)，直接从源数据获取原始href避免UI污染.添加边界避免数据更新与UI渲染不同步(时序冲突)的崩溃
+            if tree.get_children(): self._saved_hrefs = {self._curr_toc[int(i)]['href'] for i in tree.selection() if int(i) < len(self._curr_toc)}
         def refresh():
             ttk.Style().map("Treeview", foreground=[e for e in ttk.Style().map("Treeview", query_opt="foreground") if e[:2] != ("!disabled", "!selected")]) #修复py3.8 Tk8.6.9树视图tag颜色失效Bug
             tree.delete(*tree.get_children())
@@ -861,6 +879,7 @@ class EpubProcessor:
             for idx, e in enumerate(self._curr_toc):
                 t, h = e.get('title', ''), e['href']
                 fn = unquote(h.split('#')[0]).split('/')[-1]
+                # 基于opf.parent(源自_parse_toc)判定文件是否存在
                 p_ex = (opf.parent / unquote(h.split('#')[0])).exists()
                 # 判定：路径不存在的文件用mis 不在spine内用warn
                 tag = ("mis",) if "_spt_" not in h and not p_ex else (("warn",) if "_spt_" not in h and fn not in sn else ())
@@ -875,13 +894,19 @@ class EpubProcessor:
             patterns = [r[0] for r in self._split_rules]
             if patterns and (nt := self._internal_split_logic(patterns, self._curr_toc, temp_path, self._split_rules)): self._curr_toc = nt
             refresh()
+        def reload_toc(): # 根据当前下拉框状态重新解析目录并刷新显示
+            src = self._toc_source_var.get()
+            soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
+            if (new_t := self._parse_toc(soup, opf, priority=src)): self._init_toc, self._curr_toc = new_t, new_t.copy(); run_splits()
+            else: messagebox.showwarning("警告", f"未找到有效的 {src} 目录条目")
+
         # 正则输入区
         regex_entries, reg_frame = [], ttk.Frame(dialog); reg_frame.pack(fill="x", padx=5)
         def add_row(txt="", level=2):
             row = ttk.Frame(reg_frame); row.pack(fill="x", pady=1)
             cb = ttk.Combobox(row, values=("层级2(子章节)", "层级1(同级)"), state="readonly", width=12)
-            cb.pack(side="left", padx=2); cb.set("层级2(子章节)" if level == 2 else "层级1(同级)")
-            en = tk.Entry(row); en.pack(side="left", fill="x", expand=True, padx=2); en.insert(0, txt); regex_entries.append((cb, en))
+            cb.pack(side="left"); cb.set("层级2(子章节)" if level == 2 else "层级1(同级)")
+            en = tk.Entry(row); en.pack(side="left", fill="x", expand=True, padx=3); en.insert(0, txt); regex_entries.append((cb, en))
             m = tk.Menu(dialog, tearoff=0); m.add_command(label="新增正则框", command=add_row)
             m.add_command(label="删除正则条目", command=lambda: [row.destroy(), regex_entries.remove((cb, en)), run_splits()] if len(regex_entries)>1 else [en.delete(0, 'end'), run_splits()])
             m.add_command(label="粘贴并预览", command=lambda: [en.delete(0, 'end'), en.insert(0, dialog.clipboard_get()), run_splits()])
@@ -890,6 +915,10 @@ class EpubProcessor:
         [add_row(r, getattr(self, "_saved_regex_levels", [])[i] if len(getattr(self, "_saved_regex_levels", [])) > i else 2) for i, r in enumerate(getattr(self, "_saved_regex_list", []) or [""])]; run_splits()
         # 底部按钮
         btn_frame = ttk.Frame(dialog); btn_frame.pack(side="bottom", fill="x", pady=10)
+        # 使用 place 绝对定位下拉框，不占用 pack 的分配空间，确保 buttons 真正居中
+        src_cb = ttk.Combobox(btn_frame, textvariable=self._toc_source_var, values=("nav", "ncx"), state="readonly", width=3)
+        src_cb.place(x=5, rely=0.5, anchor="w"); src_cb.bind("<<ComboboxSelected>>", lambda e: reload_toc())
+        
         inner_box = ttk.Frame(btn_frame); inner_box.pack(anchor="center")
         ttk.Button(inner_box, text="预览全部正则追加、分割章节", command=run_splits).pack(side="left", padx=5)
         def on_confirm():
