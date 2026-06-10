@@ -318,7 +318,7 @@ class EpubProcessor:
             ('modify_html_enabled', '傍点转ruby', '需要检查class', [('class_name_var', 'em-sesame|em-dot|kenten', tk.Entry, {'w': 25, 'sticky': 'ew'}, '一般class名:\nem-sesame|em-dot|kenten')]),
             ('process_ruby_enabled', 'Ruby格式规格化', '格式奇怪跟包含gaiji图片的标签规格化兼容处理', []),
             ('process_images_enabled', '图片标签多看交互规格化', '将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji', []),
-            ('merge_xhtml_enabled', 'Xhtml章节间合并', '根据目录合并章节间文件', [
+            ('merge_xhtml_enabled', 'Xhtml章节间合并', '根据目录合并章节间文件\n优先使用nav,没有则使用ncx', [
                 ('merge_separator_var', '3br', ttk.Combobox, {'w': 5, 'val': ['-','hr+br']+[f'{i}br' for i in range(1, 9)]}, '章节合并时插入的分隔符样式'),
                 ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, '删除指定的空行数量'),
                 ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
@@ -597,7 +597,7 @@ class EpubProcessor:
                     and (href:=itm.get('href')) and not href.lower().endswith('nav.xhtml')]
         logger.debug(f"Spine文件列表: {spine_files}")
 
-        toc = self._parse_toc(opf_soup,opf_path)
+        toc = self._parse_toc(opf_soup,opf_path) # parse_toc决定优先使用nav
         logger.debug(f"目录条目: {toc}")
         toc_anchors=[]
         for e in toc:
@@ -651,6 +651,14 @@ class EpubProcessor:
     def _parse_toc(self, opf_soup, opf_path, priority='nav'):
         """解析目录结构 优先nav 后解析ncx"""
         nav_res, ncx_res = [], []
+        # 路径解析函数:处理nav ncx不同路径的问题,分别返回以opf为基准的相对路径，并保留可能有的锚点信息
+        def _resolve_href(base_path, raw_href):
+            # 安全分离:file_path接收纯路径.*anchors接收可能存在的锚点列表
+            file_path, *anchors = raw_href.split('#', 1)
+            # 获取绝对路径，并转为相对于opf根目录的posix规范路径
+            rel_path = (base_path.parent / file_path).resolve().relative_to(opf_path.parent.resolve()).as_posix()
+            # 结果拼接：如果有锚点则带上#拼回，否则直接返回纯路径
+            return f"{rel_path}#{anchors[0]}" if anchors else rel_path
         # nav
         if (nav_item := opf_soup.find('item', properties='nav')) and (nav_path := (opf_path.parent / nav_item['href']).resolve()).exists():
             with nav_path.open('r', encoding='utf-8') as f:
@@ -659,7 +667,8 @@ class EpubProcessor:
                         nav_soup.find('nav', attrs={'role': 'doc-toc'}) or
                         nav_soup.find('nav', id='toc')):
                 nav_res = [
-                    {'title': a.text.strip(), 'href': a['href'].split('#')[0], 
+                    {'title': a.text.strip(), 
+                     'href': _resolve_href(nav_path, a['href']),
                      'depth': len(a.find_parents('li')) - 1}
                     for a in nav_tag.find_all('a', href=True)]
         # ncx
@@ -668,7 +677,8 @@ class EpubProcessor:
                 ncx_soup = BeautifulSoup(f.read(), 'xml')
             if nav_map := ncx_soup.find('navMap'):
                 ncx_res = [
-                    {'title': nav_point.find('navLabel').text.strip(), 'href': nav_point.find('content')['src'],
+                    {'title': nav_point.find('navLabel').text.strip(),
+                     'href': _resolve_href(ncx_path, nav_point.find('content')['src']),
                      'depth': len(nav_point.find_parents('navPoint'))}
                     for nav_point in nav_map.find_all('navPoint')]
         return (nav_res or ncx_res) if priority == 'nav' else (ncx_res or nav_res)
