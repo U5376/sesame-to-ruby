@@ -353,16 +353,25 @@ class EpubNCXGenerator:
                     if (toc := nav_soup.find('nav', {'epub:type': 'toc'}) or nav_soup.find('nav', {'role': 'doc-toc'})) and (root := toc.find(['ol', 'ul'])):
                         a_idx = spine_files.index(atokagi_file)
                         lis = root.find_all('li', recursive=False)
-                        ins = next((li for li in lis if (a := li.find('a', href=True)) and (h := a['href'].split('#')[0]) in spine_files and spine_files.index(h) > a_idx), None)
+                        ins = next(
+                            (li for li in lis if 
+                             # 提取带链接的<a>标签
+                             (a := li.find('a', href=True)) and 
+                             # 统一路径：将相对于nav.xhtml的href转换为相对于OPF的标准相对路径
+                             (rel := (nav_path.parent / a['href'].split('#')[0]).resolve().relative_to(opf_path.parent.resolve()).as_posix()) in spine_files 
+                             # 位置判定：确保找到的条目在spine中的位置排在あとがき之后
+                             and spine_files.index(rel) > a_idx), None)
                         
+                        # 计算あとがき文件相对于nav.xhtml的路径
+                        nav_rel_atokagi = (opf_path.parent / atokagi_file).relative_to(nav_path.parent).as_posix()
+                        # 插入あとがき条目并添加\n
                         new_li = nav_soup.new_tag('li')
-                        new_li.append(nav_soup.new_tag('a', href=atokagi_file))
-                        new_li.a.string = 'あとがき'
-                        ins.insert_before(new_li) if ins else root.append(new_li)
+                        new_li.append(nav_soup.new_tag('a', href=nav_rel_atokagi, string='あとがき'))
+                        (ins.insert_before(new_li) if ins else root.append(new_li)); new_li.insert_after(NavigableString('\n'))
                         
                         nav_path.write_text(nav_soup.decode(formatter='html'), encoding='utf-8')
                         any_changed = True
-                        logger.success(f"nav 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
+                        logger.success(f"nav 已补全あとがき条目: 标题=あとがき, 路径={nav_rel_atokagi}")
 
         # 将文件写入逻辑移至最外层，确保路径修正、偏移和后记补全均能正常触发保存
         if any_changed and ncx_path and ncx_text: ncx_path.write_text(ncx_text, encoding='utf-8')
