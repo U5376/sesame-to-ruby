@@ -855,13 +855,6 @@ class EpubProcessor:
         # 如果存在nav则优先显示nav 否则使用ncx
         has_nav = bool(opf_soup.find('item', properties='nav'))
         self._toc_source_var = tk.StringVar(value="nav" if has_nav else "ncx")
-        self._current_base_dir = opf.parent # 动态基准目录初始化
-        def update_base_dir(src, soup):
-            # 根据选中的目录源nav/ncx 动态计算基准路径
-            if src == 'nav' and (it := soup.find('item', properties='nav')): self._current_base_dir = (opf.parent / it['href']).parent
-            elif src == 'ncx' and (it := soup.find('item', attrs={"media-type": "application/x-dtbncx+xml"})): self._current_base_dir = (opf.parent / it['href']).parent
-            else: self._current_base_dir = opf.parent
-        update_base_dir(self._toc_source_var.get(), opf_soup)
         self._init_toc, self._curr_toc = (t := self._parse_toc(opf_soup, opf, priority=self._toc_source_var.get())), t.copy()
         if not t: return messagebox.showwarning("警告", "未找到目录条目")
 
@@ -886,8 +879,8 @@ class EpubProcessor:
             for idx, e in enumerate(self._curr_toc):
                 t, h = e.get('title', ''), e['href']
                 fn = unquote(h.split('#')[0]).split('/')[-1]
-                # 基于动态基准目录判定文件是否存在
-                p_ex = (self._current_base_dir / unquote(h.split('#')[0])).exists()
+                # 基于opf.parent(源自_parse_toc)判定文件是否存在
+                p_ex = (opf.parent / unquote(h.split('#')[0])).exists()
                 # 判定：路径不存在的文件用mis 不在spine内用warn
                 tag = ("mis",) if "_spt_" not in h and not p_ex else (("warn",) if "_spt_" not in h and fn not in sn else ())
                 pre = "[!路径文件不存在] " if tag == ("mis",) else ("[!spine列表内不存在] " if tag == ("warn",) else "")
@@ -904,7 +897,6 @@ class EpubProcessor:
         def reload_toc(): # 根据当前下拉框状态重新解析目录并刷新显示
             src = self._toc_source_var.get()
             soup = BeautifulSoup(opf.read_text("utf-8"), "xml")
-            update_base_dir(src, soup)
             if (new_t := self._parse_toc(soup, opf, priority=src)): self._init_toc, self._curr_toc = new_t, new_t.copy(); run_splits()
             else: messagebox.showwarning("警告", f"未找到有效的 {src} 目录条目")
 
