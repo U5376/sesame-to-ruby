@@ -868,8 +868,8 @@ class EpubProcessor:
         [tree.heading(c, text=t) or tree.column(c, width=w) for c, t, w in [("t", "目录 (选中不合并)", 350), ("h", "HTML文件", 150)]]
 
         def update_mem(): 
-            # 通过绑定的iid(即索引)，直接从源数据获取原始 href，避免 UI 污染
-            if tree.get_children(): self._saved_hrefs = {self._curr_toc[int(i)]['href'] for i in tree.selection()}
+            # 通过绑定的iid(即索引)，直接从源数据获取原始href避免UI污染.添加边界避免数据更新与UI渲染不同步(时序冲突)的崩溃
+            if tree.get_children(): self._saved_hrefs = {self._curr_toc[int(i)]['href'] for i in tree.selection() if int(i) < len(self._curr_toc)}
         def refresh():
             ttk.Style().map("Treeview", foreground=[e for e in ttk.Style().map("Treeview", query_opt="foreground") if e[:2] != ("!disabled", "!selected")]) #修复py3.8 Tk8.6.9树视图tag颜色失效Bug
             tree.delete(*tree.get_children())
