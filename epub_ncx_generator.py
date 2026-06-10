@@ -17,8 +17,8 @@ class EpubNCXGenerator:
 
             if ncx_path:
                 # 存在ncx则确保在opf根目录下并且名称为toc
-                if ncx_path.resolve() != target_ncx.resolve(): shutil.move(ncx_path, target_ncx)
-                logger.debug(f"已将ncx移动到根目录: {target_ncx}")
+                if ncx_path.resolve() != target_ncx.resolve(): 
+                    shutil.move(ncx_path, target_ncx); logger.debug(f"已将ncx移动到根目录: {target_ncx}")
                 EpubNCXGenerator._update_opf_reference(opf_path, 'toc.ncx')
                 logger.info("toc.ncx已存在，已确保OPF内引用和spine的正确")
                 return True, "toc.ncx已存在，已确保OPF内引用和spine的正确"
