@@ -335,8 +335,9 @@ class EpubProcessor:
                   '-s 锐化 默认1.0不处理\n-A 保留透明通道Alpha\n-w 线程数\n-m WebP压缩等级 1-6'))]),
             ('auto_override_enabled', '旋转图片', '用于 飾り罫線 自动旋转\n超过阈值追加覆盖成新的转换参数\n需要触发阈值、没被排除、-R参数命中才会旋转', [
                 ('override_count_var', '10', tk.Entry, {'w': 3}, '触发追加参数的最低出现次数阈值'),
-                ('override_skip_var', 'gaiji', tk.Entry, {'w': 8, 'px': (4,0)}, '正则排除图片(匹配class或src)\n例:gaiji|cover\\.jpg |隔开多个输入'),
-                ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (4,0), 'sticky': 'ew'}, 
+                ('override_skip_var', 'gaiji', tk.Entry, {'w': 13, 'px': (2,0), 'sticky': 'ew'}, 
+                 '正则匹配class或src,可用|隔开多条规则\n默认排除:命中的图片跳过处理(例:gaiji|cover)\n强制包含:+无视阈值强制追加(例:+gaiji|+cover.jpg)\n排他模式:!+仅追加命中的图片,其余全忽略(例:!+001\.jpg'),
+                ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (2,0), 'sticky': 'ew'}, 
                  '追加覆盖的参数\n-r-90 [旋转方向(+90,-90,180,270)默认0不旋转]\n-R1:2 [触发旋转的比例(1.5, 128x1366, 1:2)，为空则不限制]')]),
             ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [
                 ('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN'),
@@ -714,26 +715,64 @@ class EpubProcessor:
                 try:
                     threshold, img_counts = int(self.override_count_var.get()), {}
                     excluded_paths = set()
-                    skip_rule = getattr(self, 'override_skip_var', tk.StringVar(value='gaiji')).get().strip()
-                    skip_re = re.compile(skip_rule) if skip_rule else None
+                    included_paths = set()
+                    # 解析包含与排除规则
+                    rule_input = getattr(self, 'override_skip_var', tk.StringVar(value='gaiji')).get().strip()
+                    skip_rules, include_rules = [], []
+                    is_exclusive = False # 是否开启排他模式
+                    if rule_input:
+                        for part in rule_input.split('|'):
+                            part = part.strip()
+                            if not part: continue
+                            if part.startswith('!+'):
+                                include_rules.append(part[2:]) # 截取!+之后的内容
+                                is_exclusive = True
+                            elif part.startswith('+'):
+                                include_rules.append(part[1:]) # 截取+之后的内容
+                            else:
+                                skip_rules.append(part) # 默认作为排除规则
+                    skip_re = re.compile('|'.join(skip_rules)) if skip_rules else None
+                    include_re = re.compile('|'.join(include_rules)) if include_rules else None
                     # 只处理 .xhtml/.html 文件，且排除 nav.xhtml 正则排除图片(匹配class或src)
                     for html_file in [f for f in temp_dir_path.rglob('*') if f.suffix.lower() in ('.xhtml', '.html') and f.name.lower() != 'nav.xhtml']:
                         soup = BeautifulSoup(html_file.read_text('utf-8', 'ignore'), 'html.parser')
-                        for img in soup.find_all('img'):
-                            if (src := img.get('src')) and (abs_src := (html_file.parent / unquote(src)).resolve()).exists():
+                        # 兼容查找常规 img 标签与 svg 内的 image 标签
+                        for img in soup.find_all(['img', 'image']):
+                            # 兼容各种 src 属性写法
+                            src = img.get('src') or img.get('xlink:href') or img.get('{http://www.w3.org/1999/xlink}href') or img.get('href')
+                            if src and (abs_src := (html_file.parent / unquote(src)).resolve()).exists():
                                 p_str = str(abs_src)
                                 img_counts[p_str] = img_counts.get(p_str, 0) + 1
+                                img_class_str = ' '.join(img.get('class', []))
                                 # 命中排除正则记录到 excluded_paths
-                                if skip_re and (skip_re.search(' '.join(img.get('class', []))) or skip_re.search(src)):
+                                if skip_re and (skip_re.search(img_class_str) or skip_re.search(src)):
                                     excluded_paths.add(p_str)
-                    for p, c in {k: v for k, v in img_counts.items() if v >= threshold}.items():
+                                # 命中包含正则记录到 included_paths
+                                if include_re and (include_re.search(img_class_str) or include_re.search(src)):
+                                    included_paths.add(p_str)
+                    # 兜底检测：直接用文件名匹配正则，防止被包含在SVG内漏扫或仅存在于OPF的图片被忽略
+                    for p_str in original_images:
+                        if p_str not in img_counts:
+                            img_counts[p_str] = 0 # 保证兜底图片也能进入后续的判断逻辑
+                        file_name = Path(p_str).name
+                        if skip_re and skip_re.search(file_name):
+                            excluded_paths.add(p_str)
+                        if include_re and include_re.search(file_name):
+                            included_paths.add(p_str)
+                    for p, c in img_counts.items():
                         img_name = Path(p).name
-                        if p not in excluded_paths and override_str:
+                        if p in included_paths and override_str:
                             high_freq_images.add(p)
-                            logger.info(f"[追加参数候选] {img_name} 出现{c}次 将追加独立参数")
-                        else:
-                            reason = "命中排除规则" if p in excluded_paths else "未配置追加参数"
-                            logger.info(f"[追加参数候选] {img_name} 出现{c}次 【{reason}】")
+                            logger.info(f"[追加参数候选] {img_name} 强制命中规则 将追加独立参数")
+                        elif is_exclusive:
+                            logger.debug(f"[追加参数候选] {img_name} 出现{c}次 【未命中强制规则(排他模式)】")
+                        elif c >= threshold:
+                            if p not in excluded_paths and override_str:
+                                high_freq_images.add(p)
+                                logger.info(f"[追加参数候选] {img_name} 出现{c}次 将追加独立参数")
+                            else:
+                                reason = "命中排除规则" if p in excluded_paths else "未配置追加参数"
+                                logger.info(f"[追加参数候选] {img_name} 出现{c}次 【{reason}】")
                 except Exception as e: logger.error(f"统计图片时出错: {e}")
             # ===== 4. 生成文件名映射 =====
             # 判断是否应用了覆盖参数，从而赋予正确的后缀
