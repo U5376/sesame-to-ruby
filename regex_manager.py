@@ -175,7 +175,7 @@ class RegexManager:
         regex_entry.insert(0, regex)
         regex_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         # 拖动条（仅用于拖拽）
-        drag_bar = tk.Frame(entry_frame, width=3, bg="#E6E6E6", cursor="fleur")
+        drag_bar = tk.Frame(entry_frame, width=3, highlightthickness=3, highlightbackground="#E6E6E6", cursor="fleur")
         drag_bar.pack(side=tk.LEFT, fill=tk.Y, padx=0, pady=1)
         # 替换框
         replace_entry = tk.Entry(entry_frame, font=("宋体", 12), width=10)

@@ -273,6 +273,14 @@ def mp_process_single_file_pipeline(args):
 class EpubProcessor:
     def __init__(self, root):
         self.root = root
+        bg_target = '#F9F9F9'
+        # 只对特定的类生效，避免污染根窗口或其他
+        self.root.configure(bg=bg_target) # 1. 改变主窗口自身背景
+        self.root.option_add('*Frame.background', bg_target)
+        self.root.option_add('*Label.background', bg_target)
+        self.root.option_add('*Checkbutton.background', bg_target)
+        self.root.option_add('*Radiobutton.background', bg_target)
+        self.root.option_add('*Button.background', "#F8F8F8") # 按钮分出个色差
         self.regex_entries = []
         self.excluded_toc_entries = []
         self._exclude_tempdirs = set()
@@ -291,7 +299,7 @@ class EpubProcessor:
 
         # 按钮配置：(文本, 命令, grid(row, col), tooltip)
         btn_cfgs = [
-            ('读取epub', self.open_file_dialog, (0, 0), "加载单个epub文件\n支持拖拽epub进UI窗口"),
+            ('读取Epub ', self.open_file_dialog, (0, 0), "加载单个epub文件\n支持拖拽epub进UI窗口"),
             ('开始转换', self.start_conversion, (0, 1), "转换加载的单个epub文件"),
             ('批量转换', self.batch_convert_epubs, (0, 2), "批量转换\n支持epub拖拽到按钮\n原名文件保存至output文件夹"),
             ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
@@ -336,7 +344,7 @@ class EpubProcessor:
             ('auto_override_enabled', '旋转图片', '用于 飾り罫線 自动旋转\n超过阈值追加覆盖成新的转换参数\n需要触发阈值、没被排除、-R参数命中才会旋转', [
                 ('override_count_var', '10', tk.Entry, {'w': 3}, '触发追加参数的最低出现次数阈值'),
                 ('override_skip_var', 'gaiji', tk.Entry, {'w': 13, 'px': (2,0), 'sticky': 'ew'}, 
-                 '正则匹配class或src,可用|隔开多条规则\n默认排除:命中的图片跳过处理(例:gaiji|cover)\n强制包含:+无视阈值强制追加(例:+gaiji|+cover.jpg)\n排他模式:!+仅追加命中的图片,其余全忽略(例:!+001\.jpg'),
+                 '正则匹配class或src,可用|隔开多条规则\n默认排除:命中的图片跳过处理(例:gaiji|cover)\n强制包含:+无视阈值强制追加(例:+gaiji|+cover.jpg)\n排他模式:!+仅追加命中的图片,其余全忽略(例:!+001.*?.jpg'),
                 ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (2,0), 'sticky': 'ew'}, 
                  '追加覆盖的参数\n-r-90 [旋转方向(+90,-90,180,270)默认0不旋转]\n-R1:2 [触发旋转的比例(1.5, 128x1366, 1:2)，为空则不限制]')]),
             ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [
