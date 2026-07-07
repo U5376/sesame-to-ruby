@@ -303,7 +303,7 @@ class EpubProcessor:
             ('开始转换', self.start_conversion, (0, 1), "转换加载的单个epub文件"),
             ('批量转换', self.batch_convert_epubs, (0, 2), "批量转换\n支持epub拖拽到按钮\n原名文件保存至output文件夹"),
             ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
-            ('排除合并', self.show_exclude_dialog, (1, 1), "优先显示nav后显示ncx.注意偏移只对ncx生效\n章节合并功能排除选定的目录条目\n批量也能排除指定的章节名\n右键管理排除列表"),
+            ('排除合并', self.show_exclude_dialog, (1, 1), "优先显示nav后ncx.偏移仅对ncx生效\n章节合并功能批量排除选定的条目进行合并\n右键管理排除列表\n*正则追加条目执行在图片转换后(图片格式变化会影响条目匹配)"),
             ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态\n右键重置内存winsize值"),
         ]
         for text, cmd, (row, col), tip in btn_cfgs:
@@ -1009,7 +1009,10 @@ class EpubProcessor:
                     # 匹配层级(1=同级, 2=子级)，计算相对深度
                     matched = m.group()
                     lvl = next((r[2] for r in s_rules if re.search(f"(?:{r[0]})", matched)), 2)
-                    new_toc.append({'title': self._clean_title(matched) or f"Sec {i}", 
+                    # 支持正则多捕获组提取拼合成标题
+                    groups = [g for g in m.groups() if g and g.strip()]
+                    t_clean = self._clean_title(" ".join(groups)) if groups else self._clean_title(matched)
+                    new_toc.append({'title': t_clean or f"空条目 父级第{i}次分割", 
                                     'href': f"{hf.stem}_spt_{i:03d}.xhtml", 'depth': dep + lvl - 1})
         for remain_node in lookup.values(): new_toc.append(remain_node) # 保留失效条目
         return new_toc
@@ -1045,7 +1048,10 @@ class EpubProcessor:
             for i, m in enumerate(ms):
                 # 直接从 rules 匹配层级 (r[0]=pattern, r[2]=level)，匹配不到则默认为 2
                 depth = next((r[2] for r in rules if re.search(f"(?:{r[0]})", m.group())), 2)
-                t_clean = self._clean_title(m.group())
+                # 支持正则多捕获组提取拼合成标题
+                groups = [g for g in m.groups() if g and g.strip()]
+                t_clean = self._clean_title(" ".join(groups)) if groups else self._clean_title(m.group())
+                t_clean = t_clean or f"Chapter {i+1}"
                 # 判定：如果是首行重复则复用原文件路径，否则生成spt序列文件
                 use_orig = (i == 0 and is_empty_prefix)
                 sid = f"{hf.stem}_s0" if use_orig else f"{hf.stem}_spt_{i+1:03d}"
