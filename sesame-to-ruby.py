@@ -1004,16 +1004,31 @@ class EpubProcessor:
             if (n := hf.name) in lookup: new_toc.append(e := lookup.pop(n)); dep = e.get('depth', 0)
             if not hf.exists(): continue
             if n not in self._fcache: self._fcache[n] = hf.read_text('utf-8', 'ignore')
-            if rules.search(c := self._fcache[n]):
-                for i, m in enumerate(rules.finditer(c), 1):
-                    # 匹配层级(1=同级, 2=子级)，计算相对深度
-                    matched = m.group()
-                    lvl = next((r[2] for r in s_rules if re.search(f"(?:{r[0]})", matched)), 2)
-                    # 支持正则多捕获组提取拼合成标题
-                    groups = [g for g in m.groups() if g and g.strip()]
-                    t_clean = self._clean_title(" ".join(groups)) if groups else self._clean_title(matched)
-                    new_toc.append({'title': t_clean or f"空条目 父级第{i}次分割", 
-                                    'href': f"{hf.stem}_spt_{i:03d}.xhtml", 'depth': dep + lvl - 1})
+            c = self._fcache[n]
+            if not (ms := list(rules.finditer(c))): continue
+            # 安全回退机制:找最近的\n或块级标签，且绝对不超越body的起点
+            body_m = re.search(r'<body[^>]*>', c, re.I)
+            body_end = body_m.end() if body_m else 0
+            starts = []
+            for m in ms:
+                nl, blks = c.rfind('\n', 0, m.start()) + 1, list(re.finditer(r'<(?:p|div|h[1-6]|li|section|article)\b', c[:m.start()], re.I))
+                starts.append(max(nl, blks[-1].start() if blks else 0, body_end))
+            # 首行判定:剥离标签/实体/空白后无文本，且无图片标签，则视为首部
+            pre = c[body_end:starts[0]]
+            is_empty_prefix = not re.sub(r'&#?\w+;|\s+', '', re.sub(r'<[^>]+>', '', pre)) and not re.search(r'<(img|image|svg)\b', pre, re.I)
+            cur_h = hf.relative_to(opf.parent).as_posix()
+            for i, m in enumerate(ms):
+                # 匹配层级(1=同级, 2=子级)，计算相对深度
+                matched = m.group()
+                lvl = next((r[2] for r in s_rules if re.search(f"(?:{r[0]})", matched)), 2)
+                # 支持正则多捕获组提取拼合成标题(区分有无捕获组)
+                t_clean = self._clean_title(" ".join(g for g in m.groups() if g and g.strip())) if m.groups() else self._clean_title(matched)
+                # 判定：如果是首行重复则复用原文件路径，否则生成spt序列文件
+                use_orig = (i == 0 and is_empty_prefix)
+                spt_idx = i if is_empty_prefix else i + 1
+                href = cur_h if use_orig else f"{hf.stem}_spt_{spt_idx:03d}.xhtml"
+                new_toc.append({'title': t_clean or f"空条目 父级第{i+1}次分割", 
+                                'href': href, 'depth': dep + lvl - 1})
         for remain_node in lookup.values(): new_toc.append(remain_node) # 保留失效条目
         return new_toc
 
@@ -1037,24 +1052,30 @@ class EpubProcessor:
             title = (re.search(r'<title>(.*?)</title>', raw, re.I) or [0, "Chapter"])[1]
             lang = (re.search(r'xml:lang="(.*?)"', raw, re.I) or [0, "ja"])[1]
             logger.debug(f"正在分割文件: {n} | 当前锚点: {last_href}")
-            # 首行判定：剥离标签/实体/空白后无文本，且无图片标签，则视为首部与第一章重合
+            # 安全回退机制:找最近的\n或块级标签，且绝对不超越body的起点
             body_m = re.search(r'<body[^>]*>', raw, re.I)
-            pre = raw[body_m.end():ms[0].start()] if body_m else raw[:ms[0].start()]
+            body_end = body_m.end() if body_m else 0
+            starts = []
+            for m in ms:
+                nl, blks = raw.rfind('\n', 0, m.start()) + 1, list(re.finditer(r'<(?:p|div|h[1-6]|li|section|article)\b', raw[:m.start()], re.I))
+                starts.append(max(nl, blks[-1].start() if blks else 0, body_end))
+            # 首行判定:剥离标签/实体/空白后无文本，且无图片标签，则视为首部与章节重合 会跳过br跟空标签(判定跳过不代表会删除这些标签)
+            pre = raw[body_end:starts[0]]
             is_empty_prefix = not re.sub(r'&#?\w+;|\s+', '', re.sub(r'<[^>]+>', '', pre)) and not re.search(r'<(img|image|svg)\b', pre, re.I)
-            ivs, cur_h, subs = [m.start() for m in ms] + [len(raw)], hf.relative_to(opf_p.parent).as_posix(), []
+            ivs, cur_h, subs = starts + [len(raw)], hf.relative_to(opf_p.parent).as_posix(), []
             # 若首部为空 沿用原文件.否则仅保留匹配条目前的内容，匹配条目后的内容正常切割出新文件
             hf.write_text(raw[:ivs[1 if is_empty_prefix else 0]].split("</body>")[0] + "\n</body>\n</html>", 'utf-8')
             # 依规则原序提取子章节信息 (1=同级/父, 2=子级)
             for i, m in enumerate(ms):
                 # 直接从 rules 匹配层级 (r[0]=pattern, r[2]=level)，匹配不到则默认为 2
                 depth = next((r[2] for r in rules if re.search(f"(?:{r[0]})", m.group())), 2)
-                # 支持正则多捕获组提取拼合成标题
-                groups = [g for g in m.groups() if g and g.strip()]
-                t_clean = self._clean_title(" ".join(groups)) if groups else self._clean_title(m.group())
-                t_clean = t_clean or f"Chapter {i+1}"
+                # 支持正则多捕获组提取拼合成标题(区分有无捕获组)
+                t_clean = self._clean_title(" ".join(g for g in m.groups() if g and g.strip())) if m.groups() else self._clean_title(m.group())
+                t_clean = t_clean or f"空条目 父级第{i+1}次分割"
                 # 判定：如果是首行重复则复用原文件路径，否则生成spt序列文件
                 use_orig = (i == 0 and is_empty_prefix)
-                sid = f"{hf.stem}_s0" if use_orig else f"{hf.stem}_spt_{i+1:03d}"
+                spt_idx = i if is_empty_prefix else i + 1 # 动态调整spt序号
+                sid = f"{hf.stem}_s0" if use_orig else f"{hf.stem}_spt_{spt_idx:03d}"
                 shref = cur_h if use_orig else (hf.parent / f"{sid}.xhtml").relative_to(opf_p.parent).as_posix()
                 if not use_orig:
                     (hf.parent / f"{sid}.xhtml").write_text(TPL.format(l=lang, t=title, c=raw[ivs[i]:ivs[i+1]].split("</body>")[0].strip()), 'utf-8')
