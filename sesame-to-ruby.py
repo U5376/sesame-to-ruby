@@ -138,6 +138,7 @@ def mp_post_process_images(soup):
 def mp_process_blank_lines(soup, remove_blank, limit_blank, remove_head_blank=False):
     """全局空行清理与连续空行限制、首部空行清理"""
     def is_blank_tag(tag):
+        # 判定空行的条件:1.<br>标签 2.<p>无文本且仅含<br>或空白 3.<div>无文本且子节点仅为br跟空白p标签
         if tag.name == 'br': return True
         if tag.name == 'p':
             children = [c for c in tag.children if isinstance(c, (str, type(tag)))]
@@ -328,8 +329,10 @@ class EpubProcessor:
             ('process_images_enabled', '图片标签多看交互规格化', '将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji', []),
             ('merge_xhtml_enabled', 'Xhtml章节间合并', '根据目录合并章节间文件\n优先使用nav,没有则使用ncx', [
                 ('merge_separator_var', '3br', ttk.Combobox, {'w': 5, 'val': ['-','hr+br']+[f'{i}br' for i in range(1, 9)]}, '章节合并时插入的分隔符样式'),
-                ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, '删除指定的空行数量'),
-                ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
+                ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, 
+                 '删除指定的空行数量\n\n指代码上的空行(阅读器一般只渲染br标签)\n简单例子:\n<br/>\n<p><br/></p>\n<p class="calibre"></p>\n<p> </p>\n<div><br/></div>\n<div><p></p></div>\n<div><p><br/></p></div>'),
+                ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, 
+                 '限制连续空行数\n\n空行判定(满足其一):\n1.<br/>或<br>\n2.<p>无文本且仅含<br>或空白\n3.<div>无文本且子节点仅为br跟空白p标签')]),
             ('delete_style_enabled', '删除自带Style并添加自定义样式表', '清理原有样式跟opf竖排属性\n添加css文件及更新引用\n规格化头部信息', []),
             ('generate_ncx_enabled', '生成ncx', '没有则自动生成ncx\n确保OPF内引用和spine正确', [
                 ('ncx_path_fix_enabled', 'src修正', tk.Checkbutton, {'px': (0, 0)}, '对照opf列表自动修正ncx内src路径'),
