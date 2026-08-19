@@ -129,20 +129,25 @@ class RegexManager:
     def _load_from_ini(self):
         """ini配置加载"""
         with open(self.config_file, 'r', encoding='utf-8') as f:
-            current_rule, current_key = { }, None
-            lines = [line.rstrip('\n') for line in f]
-            for line in lines:
-                if line.strip() == "[RegexRules]": continue
+            current_rule, current_key, in_sec = {}, None, False
+            for line in f:
+                line = line.rstrip('\n')
+                # 仅读取[RegexRules]段
+                if line.startswith('['):
+                    current_rule and self._add_rule_from_dict(current_rule)
+                    current_rule, current_key, in_sec = {}, None, (line.strip() == "[RegexRules]")
+                    continue
+                if not in_sec: continue
+
                 if line.startswith('rule_'):
                     current_rule and self._add_rule_from_dict(current_rule)
                     current_rule, current_key = {}, None
-                    continue
-                if not line.strip(): continue
-                if '=' in line:
+                # 读取tooltip多行续行:拼接换行并剥离首个缩进符(保留空格跟空行)
+                elif current_key == 'tooltip' and (line.startswith('\t') or line.startswith(' ')):
+                    current_rule[current_key] += '\n' + line[1:]
+                elif '=' in line:
                     key, value = line.split('=', 1)
                     current_rule[key.strip()], current_key = value, key.strip()
-                elif current_key and (line.startswith(' ') or line.startswith('\t')):
-                    current_rule[current_key] += '\n' + line.lstrip()
             current_rule and self._add_rule_from_dict(current_rule)
 
     def _add_rule_from_dict(self, rule_dict):
@@ -150,7 +155,7 @@ class RegexManager:
         regex = rule_dict.get('regex', '')
         replace = rule_dict.get('replace', '')
         tooltip = rule_dict.get('tooltip', '')
-        if regex:  # 有效性检查
+        if regex or replace or tooltip:  # 有效性检查 三个为空则不加载
             self.add_entry(regex, replace, tooltip)
 
     def _create_default_rules(self):
@@ -166,10 +171,9 @@ class RegexManager:
         for regex, replace, tip in defaults:
             self.add_entry(regex, replace, tip)
 
-    def add_entry(self, regex="", replace="", tooltip=None):
+    def add_entry(self, regex="", replace="", tooltip=None, index=None):
         """添加正则条目 拖动手动排序"""
         entry_frame = tk.Frame(self.inner_frame)
-        entry_frame.pack(fill=tk.X, pady=2)
         # 正则框
         regex_entry = tk.Entry(entry_frame, font=("宋体", 12), width=15)
         regex_entry.insert(0, regex)
@@ -187,7 +191,7 @@ class RegexManager:
         drag_bar.bind("<ButtonRelease-1>", self._drag_end)
         # 右键菜单绑定
         for entry in (regex_entry, replace_entry):
-            entry.bind("<Button-3>", lambda e, w=entry_frame: self._edit_tooltip(w))
+            entry.bind("<Button-3>", lambda e, w=entry_frame: self._show_entry_context_menu(e, w))
         # 创建共享的tooltip对象
         shared_tooltip = ToolTip(regex_entry, tooltip or "")
         replace_tooltip = ToolTip(replace_entry, tooltip or "", follow_widget=regex_entry)
@@ -197,11 +201,31 @@ class RegexManager:
             command=lambda: self._delete_entry(entry_frame)
         )
         del_btn.pack(side=tk.RIGHT)
-        # 保存条目信息（包含框架和共享的tooltip）
-        self.regex_entries.append((regex_entry, replace_entry, entry_frame, shared_tooltip, replace_tooltip))
+        # 保存条目信息（包含框架和共享的tooltip 支持末尾追加或指定位置插入）
+        item = (regex_entry, replace_entry, entry_frame, shared_tooltip, replace_tooltip)
+        if index is None:
+            entry_frame.pack(fill=tk.X, pady=2)
+            self.regex_entries.append(item)
+        else:
+            self.regex_entries.insert(index, item)
+            for entry_item in self.regex_entries:
+                entry_item[2].pack_forget()
+            for entry_item in self.regex_entries:
+                entry_item[2].pack(fill=tk.X, pady=2)
         # 更新 canvas 的滚动区域，确保自动显示/隐藏滚动条
         self.inner_frame.update_idletasks()
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _show_entry_context_menu(self, event, entry_frame):
+        """正则条目右键菜单"""
+        idx = next((i for i, entry in enumerate(self.regex_entries) if entry[2] == entry_frame), None)
+        if idx is None: return
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="上方插入正则", command=lambda: self.add_entry(index=idx))
+        menu.add_command(label="下方插入正则", command=lambda: self.add_entry(index=idx + 1))
+        menu.add_command(label="编辑悬浮提示", command=lambda: self._edit_tooltip(entry_frame))
+        menu.add_command(label="删除正则", command=lambda: self._delete_entry(entry_frame))
+        menu.post(event.x_root, event.y_root)
 
     def _edit_tooltip(self, widget):
         """编辑悬浮提示"""
@@ -226,8 +250,8 @@ class RegexManager:
             font=font,
             width=6,
             command=lambda: [
-                setattr(regex_tooltip, 'text', text.get("1.0", "end-1c").strip()),
-                setattr(replace_tooltip, 'text', text.get("1.0", "end-1c").strip()),
+                setattr(regex_tooltip, 'text', text.get("1.0", "end-1c")),
+                setattr(replace_tooltip, 'text', text.get("1.0", "end-1c")),
                 top.destroy()
             ]
         ).pack(pady=(0, 3))
