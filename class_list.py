@@ -202,7 +202,14 @@ class ClassList:
                 rec = self.win_size.setup(win := tk.Toplevel(cw), key, f"600x500+{self.root.winfo_x()-300}+{self.root.winfo_y()+50}", mode='cascade')
                 win.bind('<Configure>', rec, add='+')
                 win.protocol("WM_DELETE_WINDOW", win.destroy); win.focus_force()
-                state = {"current_file": p, "search_results": [], "search_index": -1, "last_q": None} # 状态存储 (用于搜索)
+                
+                # 状态存储 (用于搜索) 
+                state = {"current_file": p, "results": [], "by_file": {}, "search_index": -1,
+                         "last_q": None, "paint_token": 0, "painted": None, "file_pos": {},
+                         "html_cache": {}, "cache_order": [], "scanned_files": set(), "opacity_cache": {}}
+
+                # 性能优化: 兼容 py3.8，将绝对字符索引秒转为 Tkinter 的 "line.col" 格式，实现 O(1) 直接内存定位，彻底消灭 B-Tree 遍历卡顿
+                def to_tk_idx(pos, text): return "%d.%d" % (text.count('\n', 0, pos) + 1, pos - text.rfind('\n', 0, pos) - 1)
 
                 # 定义跳过图片的获取逻辑 (用于左右键切换)
                 def get_next_text(rev):
@@ -215,69 +222,258 @@ class ClassList:
                     return valid[0]
 
                 sf = ttk.Frame(win); sf.pack(fill="x", padx=2, pady=2)
-                se = ttk.Entry(sf); se.pack(side="left", fill="x", expand=1)
+                
+                # 增加输入验证，限制最大输入长度为1000，防止粘贴超长文本卡死
+                def validate_entry(new_value):
+                    return len(new_value) <= 1000
+                vcmd = (win.register(validate_entry), '%P')
+                se = ttk.Entry(sf, validate="key", validatecommand=vcmd); se.pack(side="left", fill="x", expand=1)
                 
                 # 全局搜索复选框
                 global_search_var = tk.BooleanVar(value=False)
-                ttk.Checkbutton(sf, text="全局匹配", variable=global_search_var, command=lambda: do_find(reset=True)).pack(side="left", padx=5)
+                # 勾选切换时强制重扫但不导航跳转(避免把用户"弹回"到结果1所在的文件)
+                ttk.Checkbutton(sf, text="全局匹配", variable=global_search_var, command=lambda: do_find(reset=True, force=True, navigate=False)).pack(side="left", padx=5)
                 sl = ttk.Label(sf, text="0/0"); sl.pack(side="right", padx=5)
                 [ttk.Button(sf, text=t, width=3, command=lambda r=v: do_find(rev=r)).pack(side="right") for t, v in [("↓", 0), ("↑", 1)]]
-                # wrap="word"可能会造成卡顿 下面换行逻辑暂时解决了 不过还是留个注释 可改为wrap="char"减轻渲染压力
-                txt = tk.Text(win, font=('Consolas', 10), wrap="word")
+                # wrap="word"渲染颜色多起来会造成卡顿 改为wrap="char"减轻渲染压力
+                txt = tk.Text(win, font=('Consolas', 10), wrap="char")
                 sv = ttk.Scrollbar(win, command=txt.yview); txt.config(yscrollcommand=sv.set)
                 [f.pack(side=s, fill=y, expand=e) for f,s,y,e in [(sv,"right","y",0), (txt,"left","both",1)]]
                 [txt.tag_config(k, background=v) for k,v in [("m", "yellow"), ("cur", "orange")]]
+                # 匹配opacity块提供灰字高亮标签(之后估摸会做自定义列表?)
+                txt.tag_config("opacity_hint", foreground="#7E7A7A")
+
+                # --- 异步多线程匹配：调用 workers_cfg 设置线程数并分块并行处理长文 ---
+                def async_render_opacity(content, fpath):
+                    if fpath in state["opacity_cache"]:
+                        matches = state["opacity_cache"][fpath]
+                        def apply_cached_batch(idx=0, step=200):
+                            if state.get("current_file") != fpath or idx >= len(matches): return
+                            batch = matches[idx:idx+step]
+                            # 使用 line.col 定位，消灭批量打标签时的卡顿
+                            indices = [v for s, e in batch for v in (to_tk_idx(s, content), to_tk_idx(e, content))]
+                            if indices: txt.tag_add("opacity_hint", *indices)
+                            win.after(15, apply_cached_batch, idx + step)
+                        win.after(0, apply_cached_batch)
+                        return
+
+                    def task():
+                        try:
+                            # 动态获取 workers_cfg 设置的线程数
+                            mw = getattr(self, 'workers_cfg', None)
+                            if callable(mw): mw = mw()
+                            max_workers = int(mw) if mw else 4
+                            
+                            pattern = re.compile(r'<(p|span|div|h[1-6])\b[^>]*\bstyle=[\'"][^\'"]*opacity:\s*0?\.\d+[^>]*>[\s\S]*?</\1>', re.IGNORECASE)
+                            matches = []
+                            length = len(content)
+                            
+                            # 短文本直接单线程，长文本利用线程池分块并行检索（带重叠区防跨行截断）
+                            if length < 3000 or max_workers <= 1:
+                                matches = [(m.start(), m.end()) for m in pattern.finditer(content)]
+                            else:
+                                chunk_len = length // max_workers
+                                overlap = 2000 # 重叠区长度，防止跨行截断
+                                ranges = [(max(0, i * chunk_len - (overlap if i > 0 else 0)), 
+                                          min(length, (i + 1) * chunk_len + (overlap if i < max_workers - 1 else 0))) 
+                                          for i in range(max_workers)]
+                                
+                                def search_chunk(sub_range):
+                                    sub_start, sub_end = sub_range
+                                    sub_str = content[sub_start:sub_end]
+                                    return [(sub_start + m.start(), sub_start + m.end()) for m in pattern.finditer(sub_str)]
+                                
+                                from concurrent.futures import ThreadPoolExecutor
+                                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                    futures = [executor.submit(search_chunk, r) for r in ranges]
+                                    seen = set()
+                                    for f in futures:
+                                        for gs, ge in f.result():
+                                            if (gs, ge) not in seen:
+                                                seen.add((gs, ge))
+                                                matches.append((gs, ge))
+                                    matches.sort(key=lambda x: x[0])
+
+                            state["opacity_cache"][fpath] = matches
+                            if not matches or state.get("current_file") != fpath: return
+                            
+                            # 回到主线程分批渲染Tag
+                            def apply_batch(idx=0, step=200):
+                                if state.get("current_file") != fpath or idx >= len(matches): return
+                                batch = matches[idx:idx+step]
+                                # 同样使用极速的 line.col 定位
+                                indices = [v for s, e in batch for v in (to_tk_idx(s, content), to_tk_idx(e, content))]
+                                if indices: txt.tag_add("opacity_hint", *indices)
+                                win.after(15, apply_batch, idx + step)
+                                
+                            win.after(0, apply_batch)
+                        except Exception as ex:
+                            logger.error(f"异步多线程渲染 opacity 失败: {ex}")
+
+                    from threading import Thread
+                    Thread(target=task, daemon=True).start()
+
+                # 显示/搜索共用的换行预处理:两边对同一内容做同一变换,保证字符偏移一致
+                def prettify(c):
+                    c = c.replace('\r\n', '\n').replace('\r', '\n')  # 归一化换行,防止Tk折叠\r\n导致偏移漂移
+                    # 为极长的标签块换行:标签各自独立成行,word wrap不再从标签内部的空格处断行
+                    c = re.sub(r'(</(?:div|p|h[1-6]|ul|ol|li|section|html|body|table)>)\s*', r'\1\n', c, flags=re.I)
+                    # 保护措施：强制切分超长单行，防止 Tkinter 在 wrap="word" 下因单行字符过多而直接卡死
+                    c = re.sub(r'([^\n]{1000}[^\s]*)\s+', r'\1\n', c)
+                    c = re.sub(r'([^\n]{3000})', r'\1\n', c)
+                    return c
+
+                # 内存读取与缓存函数 (LRU 限制最多存15个文件，避免撑爆内存)
+                def get_cached_content(fpath, z):
+                    if fpath in state["html_cache"]:
+                        state["cache_order"].remove(fpath)
+                        state["cache_order"].append(fpath)
+                        return state["html_cache"][fpath]
+                    
+                    raw = (self.modified_files[fpath] if fpath in self.modified_files and self.modified_files[fpath] is not None 
+                           else z.read(fpath) if fpath in z.namelist() else b"")
+                    content = prettify(raw.decode('utf-8', 'ignore'))
+                    
+                    state["html_cache"][fpath] = content
+                    state["cache_order"].append(fpath)
+                    if len(state["cache_order"]) > 15:
+                        del state["html_cache"][state["cache_order"].pop(0)]
+                    return content
 
                 # 加载文件内容到文本预览框并同步文件树选中状态
                 def load_content_to_text(fpath):
+                    if state.get("current_file") == fpath and txt.index("end-1c") != "1.0": return # 防止左右切换或搜索时重复渲染相同的已读文件
                     state["current_file"] = fpath; win.title(fpath)
-                    content = (self.modified_files[fpath].decode('utf-8', 'ignore') if fpath in self.modified_files and self.modified_files[fpath] is not None else
-                            zipfile.ZipFile(self.epub_path, 'r').read(fpath).decode('utf-8', 'ignore') if fpath in zipfile.ZipFile(self.epub_path, 'r').namelist() else "")
-                    # 为极长的标签块换行 大幅降低wrap="word"的渲染压力
-                    content = re.sub(r'(</(?:div|p|h[1-6]|ul|ol|li|section|html|body|table)>)\s*', r'\1\n', content, flags=re.I)
+                    
+                    with zipfile.ZipFile(self.epub_path, 'r') as z: content = get_cached_content(fpath, z)
+                    
                     txt.config(state="normal"); txt.delete("1.0", "end"); txt.insert("1.0", content); txt.config(state="disabled")
+                    
+                    # 触发异步多线程高亮 
+                    async_render_opacity(content, fpath)
+                    # 传入当前文本上下文供坐标极速转换
+                    paint_m_async(content)
+                    
                     [(ftree.selection_set(n), ftree.see(n)) for n in self.n_map.values() if n and ftree.exists(n) and ftree.item(n, "tags")[0] == fpath]
 
+                # 高亮异步分批渲染: 接收传入的 content 文本以供行列计算
+                def paint_m_async(content):
+                    key = (state.get("last_q"), state["current_file"])
+                    if state.get("painted") == key: return  # 同文件同查询:已刷/正在刷,不重复
+                    state["painted"] = key
+                    spans = state.get("by_file", {}).get(state["current_file"], ())
+                    txt.tag_remove("m", "1.0", "end")
+                    state["paint_token"] = token = state.get("paint_token", 0) + 1
+                    def batch(i=0, step=400):  # 400个匹配项一批 分批渲染
+                        if state.get("paint_token") != token: return  # 文件已切换,丢弃过期批次
+                        # 调用 to_tk_idx()，完全隔离 Tkinter 死循环计算
+                        idx = [v for s, e in spans[i:i+step] for v in (to_tk_idx(s, content), to_tk_idx(e, content))]
+                        if idx: txt.tag_add("m", *idx)
+                        if i + step < len(spans): win.after(15, batch, i + step)
+                    if spans: win.after(0, batch)
+
                 # 执行正则搜索定位，支持全局匹配与高亮
-                def do_find(rev=False, reset=False):
-                    [txt.tag_remove(t, "1.0", "end") for t in ("m", "cur")]
-                    if not (q := se.get()): return sl.config(text="0/0")
-                    if q != state["last_q"] or reset: # 仅在查询变动或重置时重新扫描
-                        state.update({"last_q": q, "search_results": [], "search_index": -1})
-                        try:
-                            with zipfile.ZipFile(self.epub_path, "r") as z:
-                                nl = z.namelist()
-                                s_files = sorted({f for f in (nl if global_search_var.get() else [state["current_file"]]) + list(self.modified_files.keys()) 
-                                                if f.endswith((".html", ".xhtml")) and (f in nl or self.modified_files.get(f) is not None)})
-                                [state["search_results"].extend([{"path": f, "span": m.span()} for m in re.finditer(q, (self.modified_files[f] if f in self.modified_files 
-                                and self.modified_files[f] is not None else z.read(f)).decode("utf-8", "ignore"))]) for f in s_files]
-                            if res := state["search_results"]: state["search_index"] = next((i for i, r in enumerate(res) if r["path"] == state["current_file"]), 0)
-                        except Exception as e: 
-                            logger.error(f"正则搜索失败: {e}")
-                            return sl.config(text="Err")
-                    if not state["search_results"]: return sl.config(text="0/0")
-                    state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(state["search_results"]) if not reset else state["search_index"]
-                    target = state["search_results"][state["search_index"]]
-                    if target["path"] != state["current_file"]: load_content_to_text(target["path"])
-                    # 分批高亮所有匹配项 txt.search改用re以支持\b等高级正则
-                    ms, m_rs = list(re.finditer(q, txt.get("1.0", "end-1c"))), []
-                    for m in ms:
-                        m_rs.extend((f"1.0+{m.start()}c", f"1.0+{m.end()}c"))
-                        if len(m_rs) >= 1000: txt.tag_add("m", *m_rs); m_rs.clear() # 500个匹配项一批 分批渲染
-                    if m_rs: txt.tag_add("m", *m_rs)
-                    # 高亮并跳转到当前特定匹配项
-                    m_idx = sum(1 for i in range(state["search_index"]) if state["search_results"][i]["path"] == target["path"])
-                    if m_idx < len(ms):
-                        m = ms[m_idx]
-                        txt.tag_add("cur", (s_idx := f"1.0+{m.start()}c"), f"1.0+{m.end()}c")
-                        txt.see(s_idx)
-                    sl.config(text=f"{state['search_index'] + 1}/{len(state['search_results'])}")
+                def do_find(rev=False, reset=False, navigate=True, force=False):
+                    if not (q := se.get()):
+                        txt.tag_remove("m", "1.0", "end"); txt.tag_remove("cur", "1.0", "end")
+                        state.update({"last_q": None, "results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
+                        return sl.config(text="0/0")
+                    
+                    # 当且仅当查询词改变或强制时才清空缓存池，否则只做增量追加
+                    if force or q != state["last_q"]:
+                        state.update({"last_q": q, "results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
+                        
+                    try:
+                        with zipfile.ZipFile(self.epub_path, "r") as z:
+                            nl = z.namelist()
+                            if not state["file_pos"]:
+                                all_valid = sorted({f for f in nl + list(self.modified_files.keys()) if f.endswith((".html", ".xhtml"))})
+                                state["file_pos"] = {f: i for i, f in enumerate(all_valid)}
+
+                            s_files = sorted({f for f in (nl if global_search_var.get() else [state["current_file"]]) + list(self.modified_files.keys()) 
+                                            if f.endswith((".html", ".xhtml")) and (f in nl or self.modified_files.get(f) is not None)})
+                            
+                            new_matches = False
+                            for f in s_files:
+                                if f not in state["scanned_files"]:
+                                    spans = [m.span() for m in re.finditer(q, get_cached_content(f, z))]
+                                    state["scanned_files"].add(f)
+                                    if spans:
+                                        state["by_file"][f] = spans
+                                        state["results"].extend((f, s) for s in spans)
+                                        new_matches = True
+                            
+                            if new_matches:
+                                state["results"].sort(key=lambda x: (state["file_pos"].get(x[0], 9999), x[1]))
+                    except Exception as e: 
+                        logger.error(f"正则搜索失败: {e}")
+                        return sl.config(text="Err")
+                    
+                    res = state["results"]
+                    content = state["html_cache"].get(state["current_file"], "")
+                    
+                    if not res:
+                        paint_m_async(content)
+                        return sl.config(text="0/0")
+                        
+                    # ↑↓导航:只移动索引(O(1)),不再tag_remove全文重刷、不再重新finditer
+                    if navigate:
+                        if state["search_index"] < 0:
+                            cur_pos = state["file_pos"].get(state["current_file"], -1)
+                            if cur_pos < 0:  # 当前文件不在扫描范围(如非html文件):直接取首/尾
+                                state["search_index"] = len(res) - 1 if rev else 0
+                            elif rev:  # ↑: 从后往前找第一条位于当前文件之前的结果,没有则回绕到最后一条
+                                state["search_index"] = next((i for i in range(len(res) - 1, -1, -1)
+                                                              if state["file_pos"].get(res[i][0], -1) < cur_pos), len(res) - 1)
+                            else:      # ↓: 从前往后找第一条位于当前文件之后的结果,没有则回绕到第一条
+                                state["search_index"] = next((i for i, (f, _) in enumerate(res)
+                                                              if state["file_pos"].get(f, -1) > cur_pos), 0)
+                        else:
+                            state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(res)
+                    elif state["search_index"] < 0 or res[state["search_index"]][0] != state["current_file"]:
+                        # 定位模式:索引还没落在当前文件时,找当前文件的第一条结果(找不到就不跳)
+                        state["search_index"] = next((i for i, (f, _) in enumerate(res) if f == state["current_file"]), -1)
+                        
+                    if state["search_index"] < 0:  # 当前文件无匹配:显示总数但不强行跳走
+                        paint_m_async(content)
+                        return sl.config(text=f"-/{len(res)}")
+                        
+                    target_path, (gs, ge) = res[state["search_index"]]
+                    if target_path != state["current_file"]: 
+                        load_content_to_text(target_path)  # 跨文件跳转(仅↑↓全局导航时触发)
+                        # 文件改变后必须重新拉取最新上下文才能保证坐标正确
+                        content = state["html_cache"].get(state["current_file"], "")
+                        
+                    # 高亮并跳转到当前特定匹配项: 同样使用极速的 line.col 定位
+                    txt.tag_remove("cur", "1.0", "end")
+                    txt.tag_add("cur", (s_idx := to_tk_idx(gs, content)), to_tk_idx(ge, content))
+                    txt.see(s_idx)
+                    # 黄底分批异步渲染
+                    paint_m_async(content)
+                    sl.config(text=f"{state['search_index'] + 1}/{len(res)}")
 
                 # 批量绑定快捷键：左右键切换文件，上下键切换搜索结果，输入框自动防抖搜索
-                [win.bind(k, lambda e, r=v: [ftree.selection_set(nxt := get_next_text(r)), ftree.see(nxt), load_content_to_text(ftree.item(nxt, "tags")[0]), do_find(reset=True)]) for k, v in [("<Left>", 1), ("<Right>", 0)]]
-                [win.bind(k, lambda e, r=v: do_find(rev=r)) for k, v in [("<Up>", 1), ("<Down>", 0)]]
-                (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(500, lambda: do_find(reset=True)))))
-                se.focus_set(); load_content_to_text(p)
+                def on_switch(rev, _e):
+                    if win.focus_get() is se: return
+                    nxt = get_next_text(rev)
+                    ftree.selection_set(nxt); ftree.see(nxt)
+                    load_content_to_text(ftree.item(nxt, "tags")[0])
+                    do_find(reset=True, navigate=False)  # 只定位不高跳
+                def on_nav(rev, _e):
+                    if win.focus_get() is se: return
+                    do_find(rev=rev)
+                win.bind("<Left>",  lambda e, r=1: on_switch(r, e))
+                win.bind("<Right>", lambda e, r=0: on_switch(r, e))
+                win.bind("<Up>",    lambda e, r=1: on_nav(r, e))
+                win.bind("<Down>",  lambda e, r=0: on_nav(r, e))
+                # 防抖触发也改成 navigate=False(输入时只刷新高亮定位,不跳文件)
+                (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(500, lambda: do_find(reset=True, navigate=False)))))
+                
+                # 打开窗口默认焦点强行切到 txt(文本预览区域)
+                txt.focus_set()
+                win.after(100, lambda: txt.focus_set())
+                
+                load_content_to_text(p)
             except Exception as ex: 
                 logger.exception(f"预览文件时发生错误: {ex}")
                 messagebox.showerror("错误", str(ex), parent=cw)
