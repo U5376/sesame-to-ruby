@@ -1039,7 +1039,8 @@ class EpubProcessor:
         """正则匹配子章节追加分割逻辑"""
         if not (rules := getattr(self, '_split_rules', [])): return current_toc
         opf_p, total = self._get_opf_path(Path(temp_dir)), 0
-        last_href = current_toc[0]['href'] if current_toc else None
+        # 锚点按spine顺序向前寻找(命中lookup才更新), 找不到保持None走目录头部插入
+        last_href = None
         regex = re.compile("|".join(f"(?:{r[0]})" for r in rules if r))
         lookup = {Path(t['href'].split('#')[0]).name: t for t in (current_toc or [])}
         TPL = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n'
@@ -1048,13 +1049,14 @@ class EpubProcessor:
                '<body>\n{c}\n</body>\n</html>')
         for hf in self._get_spine_ordered_files(opf_p):
             if (n := hf.name) in lookup:
-                last_href = lookup[n]['href']; logger.debug(f"父级起始锚点: {n} -> {last_href}")
+                last_href = lookup[n]['href']; logger.opt(colors=True).debug(f"<e>父级起始锚点:</> {n} -> {last_href}")
             raw = hf.read_text('utf-8', 'ignore')
-            if not (ms := list(regex.finditer(raw))) or not last_href: continue
+            # 锚点为None不再跳过,允许目录为空,进行分割并以头部插入创建第一条条目
+            if not (ms := list(regex.finditer(raw))): continue
             # 提取元数据：如果原文件有则用原文件的，没有则默认 ja
             title = (re.search(r'<title>(.*?)</title>', raw, re.I) or [0, "Chapter"])[1]
             lang = (re.search(r'xml:lang="(.*?)"', raw, re.I) or [0, "ja"])[1]
-            logger.debug(f"正在分割文件: {n} | 当前锚点: {last_href}")
+            logger.opt(colors=True).debug(f"<w>正在分割文件: {n} | 当前锚点: {last_href or '<y>(无锚点→目录头部)</y>'}</>")
             # 安全回退机制:找最近的\n或块级标签，且绝对不超越body的起点
             body_m = re.search(r'<body[^>]*>', raw, re.I)
             body_end = body_m.end() if body_m else 0
@@ -1096,12 +1098,15 @@ class EpubProcessor:
                     if s['href'] != cur_h: old_rf.insert_after(soup.new_tag('itemref', idref=s['id']))
                 opf_p.write_text(str(soup), 'utf-8')
             try:
+                # last_href为None时insert_sub_chapters走无锚点头部插入
                 if (added := EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, subs)):
                     total += added
                     # 锚点更新逻辑：反向查找最后一个同级(depth=1)节点，规避全量列表生成跟层级塌陷.depth=2次级节点不更新，保持原父级锚点
-                    if (l1_href := next((s['href'] for s in reversed(subs) if s.get('depth', 2) == 1), None)):
+                    # 兜底:无depth=1且无锚点(全2级已头部插为顶级)时取最后一条, 否则锚点恒为None每轮插头部顺序颠倒
+                    l1_href = next((s['href'] for s in reversed(subs) if s.get('depth', 2) == 1), subs[-1]['href'] if not last_href else None)
+                    if l1_href:
                         old_h, last_href = last_href, l1_href
-                        logger.debug(f"锚点更新(同级): {old_h} -> {last_href} (新增 {added} 章节)")
+                        logger.opt(colors=True).debug(f"<w>锚点更新(同级)</>: {old_h} -> {last_href} (新增 {added} 章节)")
             except Exception as e: logger.error(f"插入章节失败: {e}")
         if total > 0: logger.info(f"追加/分割章节完成: 共 {total} 条子章节")
         return current_toc

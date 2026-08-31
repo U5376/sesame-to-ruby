@@ -382,12 +382,21 @@ class EpubNCXGenerator:
     def insert_sub_chapters(opf_path, parent_href, sub_chapters):
         """插入子章节(相对层级: 1=父节点的同级节点, 2=父节点的子节点)"""
         if not sub_chapters or not (ps := EpubNCXGenerator._find_nav_path(opf_path)): return 0
-        target_fn, added_this_time = Path(parent_href.split('#')[0]).name, 0
-
+        # 有锚点按文件名定位父节点, 无锚点(None)由inject头部插入分支处理
+        target_fn = Path(parent_href.split('#')[0]).name if parent_href else None
+        added_this_time = 0
         # ncx 处理：解析 -> 内存递归插入 -> 重写ncx格式.按顺序根据depth相对插入同级或次级条目
         if (nx_p := ps.get('ncx')) and nx_p.exists():
             entries = EpubNCXGenerator._parse_ncx_to_entries(nx_p)
             def inject(nodes):
+                # 递归查找锚点节点并相对插入; 锚点为None时头部插入nodes最前面(仅顶层调用时nodes=entries)
+                if target_fn is None: # 无锚点(None)头部插入 按sub_chapters原序插到头部(2级挂靠前一条1级,无则退化顶级)
+                    cur, top = None, 0 # cur:前一条1级条目(2级挂靠对象), top:头部插入位置索引(仅1级推进)
+                    for s in sub_chapters:
+                        new = {'id': s['id'], 'title': BeautifulSoup(s['title'], 'html.parser').get_text(strip=True), 'href': s['href'], 'children': []}
+                        if s.get('depth', 2) == 1 or cur is None: nodes.insert(top, new); cur, top = new, top + 1 # 1级(或无法挂靠的2级): 顺序插入头部
+                        else: cur.setdefault('children', []).append(new) # 2级: 挂靠前一条1级条目
+                    return len(sub_chapters)
                 for i, n in enumerate(nodes):
                     if Path(n['href'].split('#')[0]).name == target_fn:
                         cur, idx, cnt = n, i + 1, 0 # cur:当前父节点, idx:插入位置索引
@@ -403,16 +412,20 @@ class EpubNCXGenerator:
             if (cnt := inject(entries)) is not None:
                 nx_p.write_text(EpubNCXGenerator._create_ncx_content(EpubNCXGenerator._get_uid_from_opf(opf_path), entries, 
                                 EpubNCXGenerator._get_book_title_from_opf(opf_path)), 'utf-8')
-                logger.debug(f"ncx:在 {target_fn} 后续追加 {cnt} 个章节")
+                logger.opt(colors=True).debug(f"<g>ncx:在 {target_fn}</> 后续追加 {cnt} 个章节" if target_fn else f"<y>ncx:目录头部(无锚点)</>追加 {cnt} 个章节")
                 added_this_time = cnt
 
         # nav追加插入章节(简易测试没问题 不常用 可能会出问题)
         if (nv_p := ps.get('nav')) and nv_p.exists():
             sp = BeautifulSoup(nv_p.read_text('utf-8'), 'html.parser')
-            if (ta := sp.find('a', href=lambda h: h and Path(h.split('#')[0]).name == target_fn)) and (cur_li := ta.parent):
+            # 获取OPF所在目录, 用于将OPF相对路径转换为相对nav的路径
+            opf_dir = Path(opf_path).parent.resolve()
+            rel = lambda h: (opf_dir / h).resolve().relative_to(nv_p.parent.resolve()).as_posix()
+            # 根据锚点定位父节点, 无锚点由elif处理
+            if target_fn and (ta := sp.find('a', href=lambda h: h and Path(h.split('#')[0]).name == target_fn)) and (cur_li := ta.parent):
                 cur_ol, cnt = cur_li.find(['ol', 'ul']), 0
                 for s in sub_chapters:
-                    (nl := sp.new_tag('li')).append(sp.new_tag('a', href=s['href'], string=s['title']))
+                    (nl := sp.new_tag('li')).append(sp.new_tag('a', href=rel(s['href']), string=s['title'])) # ★修改: href经rel()转换
                     if s.get('depth', 2) == 1: # 1级: 紧接在同级节点后插入，并更新基准
                         cur_li.insert_after(NavigableString('\n')); cur_li.next_sibling.insert_after(nl)
                         cur_li, cur_ol = nl, None
@@ -423,7 +436,21 @@ class EpubNCXGenerator:
                     cnt += 1
                 if cnt:
                     nv_p.write_text(sp.decode(formatter='html'), 'utf-8')
-                    logger.debug(f"nav: 在 {target_fn} 后续追加 {cnt} 个章节")
+                    logger.opt(colors=True).debug(f"<g>nav:在 {target_fn} 后续追加 {cnt} 个章节</>")
+                    added_this_time = max(added_this_time, cnt)
+            elif not target_fn and (toc_nav := sp.find('nav', {'epub:type': 'toc'}) or sp.find('nav', {'role': 'doc-toc'})) and (root := toc_nav.find(['ol', 'ul'])): # 无锚点头部插入 定位toc根列表
+                prev_top, cnt = None, 0 # prev_top:前一条1级条目(2级挂靠对象)
+                for s in sub_chapters:
+                    (nl := sp.new_tag('li')).append(sp.new_tag('a', href=rel(s['href']), string=s['title'])) # ★修改: href经rel()转换
+                    if s.get('depth', 2) == 1 or prev_top is None: # 1级(或无法挂靠的2级): 顺序插入头部 保持sub_chapters原序
+                        (prev_top.insert_after(NavigableString('\n'), nl) if prev_top else root.insert(0, nl)); prev_top = nl
+                    else: # 2级: 挂靠前一条1级条目的内部列表(ol/ul) 采用extend高密度压入换行符
+                        (sub_ol := prev_top.find(['ol', 'ul'])) or prev_top.extend([NavigableString('\n'), sub_ol := sp.new_tag('ol'), NavigableString('\n')])
+                        sub_ol.extend([NavigableString('\n'), nl, NavigableString('\n')])
+                    cnt += 1
+                if cnt:
+                    nv_p.write_text(sp.decode(formatter='html'), 'utf-8')
+                    logger.opt(colors=True).debug(f"<w>nav:目录头部(无锚点)</>追加 {cnt} 个章节")
                     added_this_time = max(added_this_time, cnt)
         return added_this_time # 返回给外层循环累计
 
