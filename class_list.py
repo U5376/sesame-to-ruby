@@ -316,11 +316,11 @@ class ClassList:
                 # 显示/搜索共用的换行预处理:两边对同一内容做同一变换,保证字符偏移一致
                 def prettify(c):
                     c = c.replace('\r\n', '\n').replace('\r', '\n')  # 归一化换行,防止Tk折叠\r\n导致偏移漂移
-                    # 为极长的标签块换行:标签各自独立成行,word wrap不再从标签内部的空格处断行
-                    c = re.sub(r'(</(?:div|p|h[1-6]|ul|ol|li|section|html|body|table)>)\s*', r'\1\n', c, flags=re.I)
+                    #【换char所以目前不需要 注释掉】为极长的标签块换行:标签各自独立成行,word wrap不再从标签内部的空格处断行
+                    #c = re.sub(r'(</(?:div|p|h[1-6]|ul|ol|li|section|html|body|table)>)\s*', r'\1\n', c, flags=re.I)
                     # 保护措施：强制切分超长单行，防止 Tkinter 在 wrap="word" 下因单行字符过多而直接卡死
-                    c = re.sub(r'([^\n]{1000}[^\s]*)\s+', r'\1\n', c)
-                    c = re.sub(r'([^\n]{3000})', r'\1\n', c)
+                    #c = re.sub(r'([^\n]{1000}[^\s]*)\s+', r'\1\n', c)
+                    #c = re.sub(r'([^\n]{3000})', r'\1\n', c)
                     return c
 
                 # 内存读取与缓存函数 (LRU 限制最多存15个文件，避免撑爆内存)
