@@ -586,7 +586,7 @@ class ClassList:
                     low = p.lower()
                     # 语义权重：HTML(0) > CSS(1) > ncx/opf/xml(2) > 其他(3)
                     w = 0 if low.endswith(('.html', '.xhtml')) else 1 if low.endswith('.css') else 2 if low.endswith(('.ncx', '.opf', '.xml')) else 3
-                    return (not p.endswith('/'), w, (0, spine.get(p, 0)) if w == 0 else (1, low))
+                    return (w, (0, spine.get(p, 0)) if w == 0 else (1, low))
                 nl = sorted(z.namelist(), key=sort_key)
                 # 构建文件树
                 [ (parts := p.split('/'), [ (cur := "/".join(parts[:i+1]), pre := "/".join(parts[:i]), 
