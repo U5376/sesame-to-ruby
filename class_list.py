@@ -34,11 +34,19 @@ class ClassList:
     def show_class_list(self):
         cw = tk.Toplevel(self.root)
         cw.title("html内样式收集分析")
-        cw.protocol("WM_DELETE_WINDOW", lambda c=cw: (setattr(self, '_running', False), 
-                                                      [c.after_cancel(aid) for aid in self._after_ids], 
-                                                      [(w.unbind('<Destroy>'), w.destroy()) for w in c.winfo_children()], 
-                                                      [clean_old_epub_cache()],  # 关闭时清理旧缓存
-                                                      c.destroy()))
+        def on_class_list_close():
+            self._running = False
+            for aid in self._after_ids:
+                cw.after_cancel(aid)
+            # 递归解绑所有深层子组件的 Destroy 事件，彻底阻断 TkinterDnD2 的异常 lambda 回调
+            def unbind_destroy_recursive(widget):
+                for child in widget.winfo_children():
+                    child.unbind('<Destroy>')
+                    unbind_destroy_recursive(child)
+            unbind_destroy_recursive(cw)
+            clean_old_epub_cache()  # 关闭时清理旧缓存
+            cw.destroy()
+        cw.protocol("WM_DELETE_WINDOW", on_class_list_close)
         rec = self.win_size.setup(cw, "class_list_main", f"600x480+{self.root.winfo_x()+30}+{self.root.winfo_y()+30}", mode='cascade')
         cw.bind('<Configure>', rec, add='+')
         pw = ttk.PanedWindow(cw, orient="horizontal"); pw.pack(fill="both", expand=True)
