@@ -587,10 +587,10 @@ class ClassList:
             with zipfile.ZipFile(self.epub_path, 'r') as z:
                 spine = get_opf_spine_order(z)
                 def sort_key(p):
-                    low = p.lower()
-                    # 语义权重：HTML(0) > CSS(1) > ncx/opf/xml(2) > 其他(3)
-                    w = 0 if low.endswith(('.html', '.xhtml')) else 1 if low.endswith('.css') else 2 if low.endswith(('.ncx', '.opf', '.xml')) else 3
-                    return (w, (0, spine.get(p, 0)) if w == 0 else (1, low))
+                    ext = os.path.splitext(p)[1].lower()
+                    # 语义权重：HTML(0) > CSS(1) > ncx/opf(2) > 图片(3) > 其他(4)
+                    w = {'html': 0, 'xhtml': 0, 'css': 1, 'ncx': 2, 'opf': 2}.get(ext[1:], 3 if ext in ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp') else 4)
+                    return (w, (0, spine.get(p, 0)) if w == 0 else (1, p.lower()))
                 nl = sorted(z.namelist(), key=sort_key)
                 # 构建文件树
                 [ (parts := p.split('/'), [ (cur := "/".join(parts[:i+1]), pre := "/".join(parts[:i]), 
