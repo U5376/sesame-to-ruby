@@ -119,6 +119,9 @@ class ClassList:
                     messagebox.showerror("错误", str(e), parent=cw)
             # 拖出处理函数 (强制恢复视觉状态：利用锁定集合覆盖系统当前的单选状态)
             def drag_out_handler(event):
+                # 0.5秒抖动延时判定，防止误触发拖出
+                if time.time() - getattr(drag_out_handler, 'press_t', 0) < 0.5:
+                    ftree.tk.call('set', '::tkdnd::_state', 'press'); return "break"
                 if self._dragging: return "break"
                 self._dragging = True # 上锁
                 sel = getattr(drag_out_handler, 'locked_sel', ftree.selection())
@@ -145,6 +148,7 @@ class ClassList:
             ftree.bind("<<TreeviewSelect>>", lambda e: setattr(drag_out_handler, 'last_sel', ftree.selection()))
             # Button-1 按下时，如果点击项在已选集中，则立即锁定整个集合防止 DND 启动时重置
             def lock_sel(e):
+                drag_out_handler.press_t = time.time() # 抖动延时
                 rid, l_sel = ftree.identify_row(e.y), getattr(drag_out_handler, 'last_sel', ())
                 setattr(drag_out_handler, 'locked_sel', l_sel if rid in l_sel else (rid,))
             ftree.bind("<Button-1>", lock_sel, add="+")
