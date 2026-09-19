@@ -733,16 +733,18 @@ class ClassList:
                 menu.post(event.x_root, event.y_root)
         tree.bind("<Button-3>", on_right_click)
 
-        # 筛选功能
+        # 筛选功能：支持正则表达式（忽略大小写），输入非法正则时回退为普通子串匹配
         def do_filter(*_):
-            keyword = filter_var.get().strip().lower()
+            keyword = filter_var.get().strip()
+            try: match = (lambda s: re.search(keyword, s, re.IGNORECASE)) if keyword else None
+            except re.error: match = lambda s: keyword.lower() in s.lower()
             tree.selection_remove(tree.selection())
             for group, cls, iid in self.all_items_refs:
                 tree.detach(iid)
                 # 提取所有相关的 CSS 文本
                 css_texts = [rule['selector'] + rule['content'] for rules in self.style_data.get(cls, {}).values() for rule in rules]
                 # 执行综合匹配：关键词为空、匹配类名或匹配 CSS 内容
-                if not keyword or keyword in cls.lower() or any(keyword in text.lower() for text in css_texts):
+                if not keyword or match(cls) or any(match(t) for t in css_texts):
                     tree.reattach(iid, nodes[group], "end")
         filter_var.trace_add("write", do_filter)
 
