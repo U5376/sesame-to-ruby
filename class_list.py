@@ -518,19 +518,22 @@ class ClassList:
                     logger.info(f"内存同步：OPF已剔除 {len(rem_ids)} 个引用")
                 except Exception as e: logger.error(f"OPF同步失败: {e}")
 
-        # Bs4获取OPF Spine顺序 解析XML并构建映射
+        # Bs4获取OPF Spine顺序、nav名 解析XML并构建映射
         def get_opf_spine_order(z):
             try:
                 bs = BeautifulSoup(z.read("META-INF/container.xml").decode("utf-8"), "xml")
                 opf_full_path = (bs.find("rootfile") or {}).get("full-path", "")
-                if not opf_full_path: return {}
+                if not opf_full_path: return {}, set()
                 opf_dir = (lambda d: f"{d.replace(chr(92), '/')}/" if d else "")(os.path.dirname(opf_full_path))
                 opf_soup = BeautifulSoup(z.read(opf_full_path).decode("utf-8"), "xml")
                 manifest = {it.get("id"): it.get("href", "") for it in opf_soup.find_all("item") if it.get("id")}
-                return {f"{opf_dir}{manifest[idref]}": idx 
-                        for idx, itemref in enumerate(opf_soup.find_all("itemref")) 
+                spine = {f"{opf_dir}{manifest[idref]}": idx
+                        for idx, itemref in enumerate(opf_soup.find_all("itemref"))
                         if (idref := itemref.get("idref")) and idref in manifest}
-            except: return {}
+                # 获取manifest中nav名
+                navs = {f"{opf_dir}{it.get('href', '')}" for it in opf_soup.find_all("item") if "nav" in (it.get("properties") or "")}
+                return spine, navs
+            except: return {}, set()
 
         # 解析单个HTML文件的函数（子线程执行：纯计算，无UI操作）
         def _parse_html_file(file_content_bytes, filename):
@@ -596,12 +599,13 @@ class ClassList:
         # 构建epub文件树 提取样式和实例数据
         def parse_gen():
             with zipfile.ZipFile(self.epub_path, 'r') as z:
-                spine = get_opf_spine_order(z)
+                spine, navs = get_opf_spine_order(z)
                 def sort_key(p):
                     ext = os.path.splitext(p)[1].lower()
                     # 语义权重：HTML(0) > CSS(1) > ncx/opf(2) > 图片(3) > 其他(4)
                     w = {'html': 0, 'xhtml': 0, 'css': 1, 'ncx': 2, 'opf': 2}.get(ext[1:], 3 if ext in ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp') else 4)
-                    return (w, (0, spine.get(p, 0)) if w == 0 else (1, p.lower()))
+                    # HTML组内细分：spine正文(0)在前按阅读顺序，nav及非spine文档(1)在后按文件名排
+                    return (w, ((0 if p in spine and p not in navs else 1), spine.get(p, 0), p.lower()) if w == 0 else (1, p.lower()))
                 nl = sorted(z.namelist(), key=sort_key)
                 # 构建文件树
                 [ (parts := p.split('/'), [ (cur := "/".join(parts[:i+1]), pre := "/".join(parts[:i]), 
