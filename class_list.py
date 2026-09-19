@@ -662,10 +662,31 @@ class ClassList:
                 samples = [f"【文件: {f}】\n" + "\n\n".join(ss) for f, ss in gps.items()]
                 for t, cnt in zip(ts, ["\n\n".join(rules) or f"/* 未找到 {name} */", "\n\n".join(samples)]):
                     t.config(state="normal"); t.delete("1.0", "end"); t.insert("end", cnt); t.config(state="disabled")
+            # 文本框右键复制：有选中复制选中，否则复制全部
+            def txt_copy(t, sel):
+                txt = t.get("sel.first", "sel.last") if sel else t.get("1.0", "end").rstrip("\n")
+                if txt:
+                    win.clipboard_clear(); win.clipboard_append(txt)
+            dmenu = tk.Menu(win, tearoff=0)
+            def on_det_right_click(event):
+                t = event.widget; has_sel = bool(t.tag_ranges("sel"))
+                dmenu.delete(0, "end")
+                dmenu.add_command(label="复制样式名", command=lambda: (win.clipboard_clear(), win.clipboard_append(win.title())))
+                dmenu.add_command(label="复制选中", state="normal" if has_sel else "disabled", command=lambda: txt_copy(t, True))
+                dmenu.add_command(label="复制全部", command=lambda: txt_copy(t, False))
+                dmenu.post(event.x_root, event.y_root)
+            [t.bind("<Button-3>", on_det_right_click) for t in ts]
             # 绑定键盘和关闭协议
             [win.bind(k, lambda e, r=v: [tree.selection_set(get_nxt(r)), tree.see(tree.selection()[0]), update_view()]) for k, v in [("<Left>", 1), ("<Right>", 0)]]
             win.protocol("WM_DELETE_WINDOW", lambda: [win.destroy(), tree.focus_set() if tree.winfo_exists() else None]); update_view()
         tree.bind("<Double-1>", show_details)
+
+        def copy_names():
+            names = [tree.item(i, "text") for i in tree.selection()]
+            self.root.clipboard_clear()
+            self.root.clipboard_append('\n'.join(names))
+            logger.info(f"已复制 {len(names)} 个样式名到剪贴板")
+            tree.focus_set()
 
         def copy_selected():
             items = tree.selection()
@@ -681,7 +702,7 @@ class ClassList:
                     details_list.append(f"{name}\n未找到CSS定义\n")
             self.root.clipboard_clear()
             self.root.clipboard_append('\n'.join(details_list))
-            messagebox.showinfo("复制", f"已复制 {len(items)} 个条目的详细样式到剪贴板", parent=cw)
+            logger.info(f"已复制 {len(items)} 个条目的详细样式到剪贴板")
             tree.focus_set()
 
         def write_selected_to_style_mem():
@@ -702,6 +723,7 @@ class ClassList:
             tree.focus_set()
 
         menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(label="复制选中条目样式名", command=copy_names)
         menu.add_command(label="复制选中条目详细样式", command=copy_selected)
         menu.add_command(label="临时追加到自定义style", command=write_selected_to_style_mem)
         def on_right_click(event):
