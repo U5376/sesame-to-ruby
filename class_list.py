@@ -36,14 +36,25 @@ class ClassList:
         cw.title("html内样式收集分析")
         def on_class_list_close():
             self._running = False
-            for aid in self._after_ids:
-                cw.after_cancel(aid)
+            # 只取消最新一个链式定时器(run_step每1ms重排,任意时刻仅一个存活,旧id无需逐个取消)
+            if getattr(self, '_after_id', None):
+                try:
+                    cw.after_cancel(self._after_id)
+                except Exception:
+                    logger.warning("after_cancel 失败(窗口可能已销毁)")
+                self._after_id = None
+            [cw.after_cancel(aid) for aid in self._after_ids]  # 兜底取消旧列表遗留
+            self._after_ids.clear()
             # 递归解绑所有深层子组件的 Destroy 事件，彻底阻断 TkinterDnD2 的异常 lambda 回调
             def unbind_destroy_recursive(widget):
                 for child in widget.winfo_children():
                     child.unbind('<Destroy>')
                     unbind_destroy_recursive(child)
             unbind_destroy_recursive(cw)
+            try:
+                cw.unbind('<Destroy>')
+            except Exception:
+                logger.warning("cw.unbind('<Destroy>') 失败")
             clean_old_epub_cache()  # 关闭时清理旧缓存
             cw.destroy()
         cw.protocol("WM_DELETE_WINDOW", on_class_list_close)
@@ -634,7 +645,7 @@ class ClassList:
         gen = parse_gen()
         def run_step(): # 递归调用生成器分步处理
             if self._running:
-                try: (next(gen), self._after_ids.append(cw.after(1, run_step)))
+                try: next(gen); self._after_id = cw.after(1, run_step) # 只记录最新一个定时器id：链式调度下任意时刻仅一个存活
                 except StopIteration: pass # 正常结束，静默处理
                 except Exception: logger.exception("class_list run_step 发生异常")
         run_step()
