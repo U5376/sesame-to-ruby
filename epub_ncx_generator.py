@@ -368,6 +368,9 @@ class EpubNCXGenerator:
                 ]
                 # 确保全书满足上述条件的 HTML 文件有且仅为一个
                 atokagi_file = candidates[0] if len(candidates) == 1 else None
+                if not atokagi_file:
+                    cand_desc = f"({'+'.join(candidates)})" if candidates else ""
+                    logger.debug(f"あとがき补全跳过: 候选数={len(candidates)}{cand_desc} (需恰好1个; 匹配规则=body后2000字符内前20行存在含あとがき的完整标签行)")
 
         # ===== ncx 补全あとがき/表紙条目 仅结构级插入才重建navMap(惰性重建) =====
         if ncx_text and ((atokagi_file and ncx_missing) or (cover_enabled and spine_files)):
@@ -375,13 +378,14 @@ class EpubNCXGenerator:
             seq = flatten(entries)  # 文档序平铺, 供表紙查找复用 (あとがき条目非表紙, 插入后无需刷新)
             m_nav = re.search(r'(<navMap>)(.*?)(</navMap>)', ncx_text, re.DOTALL)  # navMap定位(重建用)
             rebuilt = False  # 是否发生结构级插入(需重建navMap)
+            ncx_acts = []  # ncx侧动作聚合
             # 补全ncx あとがき条目 (保留空条目并修复索引)
             if atokagi_file and ncx_missing and m_nav:
                 a_idx = spine_files.index(atokagi_file)
                 ins_pos = next((i for i, e in enumerate(entries) if e['href'] and get_idx(e['href']) > a_idx), len(entries))
                 entries.insert(ins_pos, {'title': 'あとがき', 'href': atokagi_file, 'children': []})
                 rebuilt = True
-                logger.success(f"ncx 已补全あとがき条目: 标题=あとがき, 路径={atokagi_file}")
+                ncx_acts.append(f"补全あとがき,路径=({atokagi_file})")
             # 补全ncx 表紙条目 (受cover_enabled控制,缺省沿用atokagi_enabled)
             if cover_enabled and spine_files:
                 cover_file = spine_files[0]  # spine列表内第一个文件视为表纸
@@ -390,16 +394,16 @@ class EpubNCXGenerator:
                     # 情况2: 已有表紙条目但路径不在spine → 覆盖src(标题保留, 免得出现两个表纸条目); 丢弃旧锚点(片段是旧文件内的id, 换目标后必成死链)
                     for e in broken:
                         o_h = e['href']
-                        del_orphan_c0(o_h.split('#')[0])  # 孤儿c0.xhtml(不在spine)则删物理文件+清理OPF引用
+                        del_orphan_c0(o_h.split('#')[0])  # c0.xhtml 不在spine则删物理文件+清理OPF引用
                         if rebuilt: e['href'] = cover_file  # あとがき已触发重建 → 改树随重建一并生效
                         else: ncx_text = ncx_text.replace(f'src="{o_h}"', f'src="{cover_file}"')  # src级定点替换, 不触发重建(格式零漂移)
-                        logger.success(f"ncx 已覆盖表紙条目: {o_h} -> {cover_file}")
+                        ncx_acts.append(f"覆盖表紙({o_h} -> {cover_file})")
                         ncx_changed = True
                 elif not any(is_cover(e['title']) for e in seq):
                     # 情况1: 无任何封面/表纸条目 → 头部插入(重建时playOrder自动重排为1..N)
                     entries.insert(0, {'title': '表紙', 'href': cover_file, 'children': []})
                     rebuilt = True
-                    logger.success(f"ncx 已补全表紙条目: 标题=表紙, 路径={cover_file}")
+                    ncx_acts.append(f"补全表紙,路径=({cover_file})")
             # 统一重建navMap: 仅结构级插入时执行(src修改不重建)
             if rebuilt:
                 if m_nav:
@@ -407,12 +411,14 @@ class EpubNCXGenerator:
                     ncx_changed = True
                 else:
                     logger.warning("ncx中未找到<navMap>, 跳过navMap重建")
+            if ncx_acts: logger.success(f"ncx: {' + '.join(ncx_acts)}")  # ncx侧全部动作一行日志
 
         # ===== nav 补全あとがき/表紙条目 (bs4单次parse → soup上修改 → 单次写回) =====
         # 仅在确有nav侧任务时才解析; 注意: ncx缺失不影响nav补全(与源码一致, ncx/nav是两条独立的目录线)
         if nav_content and ((atokagi_file and nav_missing) or (cover_enabled and spine_files)):
             nav_soup = BeautifulSoup(nav_content, 'html.parser')
             if (toc := nav_soup.find('nav', {'epub:type': 'toc'}) or nav_soup.find('nav', {'role': 'doc-toc'})) and (root := toc.find(['ol', 'ul'])):
+                nav_acts = []  # nav侧动作聚合
                 def nav2opf(h):
                     # nav相对href -> OPF相对路径; relative_to改用relpath 支持../跨目录
                     try:
@@ -443,7 +449,7 @@ class EpubNCXGenerator:
                     new_li.append(nav_soup.new_tag('a', href=nav_rel_atokagi, string='あとがき'))
                     (ins.insert_before(new_li) if ins else root.append(new_li)); new_li.insert_after(NavigableString('\n'))
                     nav_changed = True
-                    logger.success(f"nav 已补全あとがき条目: 标题=あとがき, 路径={nav_rel_atokagi}")
+                    nav_acts.append(f"补全あとがき,路径=({nav_rel_atokagi})")
 
                 # 表紙补全 (受cover_enabled控制)
                 if cover_enabled and spine_files:
@@ -456,16 +462,17 @@ class EpubNCXGenerator:
                             new_li.append(nav_soup.new_tag('a', href=nav_rel_cover, string='表紙'))
                             (first_li.insert_before(new_li) if (first_li := root.find('li', recursive=False)) else root.insert(0, new_li)); new_li.insert_after(NavigableString('\n'))
                             nav_changed = True
-                            logger.success(f"nav 已补全表紙条目: 标题=表紙, 路径={nav_rel_cover}")
+                            nav_acts.append(f"补全表紙,路径=({nav_rel_cover})")
                         else:
                             # 情况2: 封面/表纸标题条目路径不在spine → 覆盖其href(避免出现两个表纸条目); 丢弃旧锚点(片段是旧文件内的id, 换目标后必成死链)
                             for a in cover_as:
                                 if not in_spine(rel := nav2opf(a['href'])):
-                                    del_orphan_c0(rel)  # 孤儿c0.xhtml(不在spine)则删物理文件+清理OPF引用 (rel=None时幂等跳过)
-                                    logger.success(f"nav 已覆盖表紙条目: {a['href']} -> {nav_rel_cover}")
+                                    del_orphan_c0(rel)  # c0.xhtml 不在spine则删物理文件+清理OPF引用 (nav这里处理可能是多余的 姑且保留)
+                                    nav_acts.append(f"覆盖表紙({a['href']} -> {nav_rel_cover})")
                                     a['href'] = nav_rel_cover
                                     nav_changed = True
                 # nav单次写回(默认bs4格式; あとがき与表紙共存时避免多次写文件)
+                if nav_acts: logger.success(f"nav: {' + '.join(nav_acts)}")  # nav侧全部动作一行日志
                 if nav_changed:
                     nav_path.write_text(nav_soup.decode(formatter='html'), encoding='utf-8')
 
@@ -475,7 +482,7 @@ class EpubNCXGenerator:
         if opf_changed:
             opf_path.write_text(str(opf_soup), encoding='utf-8')  # manifest/guide有移除时写回OPF(与convert_to_epub2同风格str序列化)
         if not (ncx_changed or nav_changed or opf_changed):
-            logger.debug("ncx无需修正")  # 只有在ncx与nav与opf均无任何修改时才显示此日志
+            logger.debug("ncx nav无需修正")  # 只有在ncx与nav与opf均无任何修改时才显示此日志
         return True, "fix_ncx_paths完成"
 
     @staticmethod
