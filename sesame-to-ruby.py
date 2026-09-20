@@ -338,7 +338,7 @@ class EpubProcessor:
                 ('ncx_path_fix_enabled', 'src修正', tk.Checkbutton, {'px': (0, 0)}, '对照opf列表自动修正ncx内src路径'),
                 ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (0, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移\n只用于ncx nav没写'),
                 ('ncx_manual_offset_val', '0', tk.Entry, {'w': 3, 'px': (0, 0)}, '强制目录偏移+ -，0不执行操作\n优先于自动偏移\n只用于ncx nav没写'),
-                ('ncx_atokagi_enabled', '补全后记', tk.Checkbutton, {'px': (2, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
+                ('ncx_atokagi_enabled', '补全条目', tk.Checkbutton, {'px': (2, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html\n附带补全封面功能,懒得写多个选项')]),
             ('convert_epub_version_enabled', '转Epub2.0并删除nav.xhtml', '将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明', []),
             ('convert_images_var', '转换图片', '图片转换设置', [
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
