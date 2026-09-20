@@ -471,6 +471,13 @@ class EpubNCXGenerator:
                                     nav_acts.append(f"覆盖表紙({a['href']} -> {nav_rel_cover})")
                                     a['href'] = nav_rel_cover
                                     nav_changed = True
+                        # 修复nav内指向孤儿c0.xhtml的链接(landmarks地标/page-list等全文档扫描; toc区封面条目已由上方覆盖兜住, 先改href不会重复命中)
+                        for a in [a for a in nav_soup.find_all('a', href=True)
+                                  if Path(a['href'].split('#')[0]).name.lower() == 'c0.xhtml'
+                                  and not in_spine(nav2opf(a['href']))]:  # 判定基准与del_orphan_c0一致(不在spine)
+                            nav_acts.append(f"landmarks地标引用:({a['href']} -> {nav_rel_cover})")
+                            a['href'] = nav_rel_cover
+                            nav_changed = True
                 # nav单次写回(默认bs4格式; あとがき与表紙共存时避免多次写文件)
                 if nav_acts: logger.success(f"nav: {' + '.join(nav_acts)}")  # nav侧全部动作一行日志
                 if nav_changed:
