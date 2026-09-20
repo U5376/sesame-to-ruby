@@ -90,7 +90,8 @@ class RegexManager:
         self._canvas_window = self.canvas.create_window((0, 0), window=self.inner_frame, anchor='nw')
         self.inner_frame.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfig(self._canvas_window, width=e.width))
-        _on_mousewheel = lambda event: self.canvas.yview_scroll(
+        # event=None：免疫悬空 after 定时器的零参误调(funcid 撞名场景)，None 时下方 getattr 守卫自然短路
+        _on_mousewheel = lambda event=None: self.canvas.yview_scroll(
             int(-1 * (event.delta / 120)) if getattr(event, 'delta', 0) else (1 if getattr(event, 'num', 0) == 5 else -1),
             'units') if getattr(event, 'delta', 0) or getattr(event, 'num', 0) in (4, 5) else None
         [self.canvas.bind(ev, fn) for ev, fn in [

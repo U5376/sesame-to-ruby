@@ -45,6 +45,13 @@ class ClassList:
                 self._after_id = None
             [cw.after_cancel(aid) for aid in self._after_ids]  # 兜底取消旧列表遗留
             self._after_ids.clear()
+            # 兜底取消所有未触发的after定时器(destroy只删命令不取消定时器，悬空定时器会误炸其它回调)
+            try:
+                for _aid in cw.tk.splitlist(cw.tk.call('after', 'info')):
+                    try: cw.after_cancel(_aid)
+                    except Exception: pass
+            except Exception:
+                logger.warning("after info 定时器清理失败")
             # 递归解绑所有深层子组件的 Destroy 事件，彻底阻断 TkinterDnD2 的异常 lambda 回调
             def unbind_destroy_recursive(widget):
                 for child in widget.winfo_children():
