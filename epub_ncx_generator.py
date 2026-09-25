@@ -385,7 +385,7 @@ class EpubNCXGenerator:
                 ins_pos = next((i for i, e in enumerate(entries) if e['href'] and get_idx(e['href']) > a_idx), len(entries))
                 entries.insert(ins_pos, {'title': 'あとがき', 'href': atokagi_file, 'children': []})
                 rebuilt = True
-                ncx_acts.append(f"补全あとがき,路径=({atokagi_file})")
+                ncx_acts.append(f"补全あとがき,路径:{atokagi_file}")
             # 补全ncx 表紙条目 (受cover_enabled控制,缺省沿用atokagi_enabled)
             if cover_enabled and spine_files:
                 cover_file = spine_files[0]  # spine列表内第一个文件视为表纸
@@ -449,7 +449,7 @@ class EpubNCXGenerator:
                     new_li.append(nav_soup.new_tag('a', href=nav_rel_atokagi, string='あとがき'))
                     (ins.insert_before(new_li) if ins else root.append(new_li)); new_li.insert_after(NavigableString('\n'))
                     nav_changed = True
-                    nav_acts.append(f"补全あとがき,路径=({nav_rel_atokagi})")
+                    nav_acts.append(f"补全あとがき,路径:{nav_rel_atokagi}")
 
                 # 表紙补全 (受cover_enabled控制)
                 if cover_enabled and spine_files:
