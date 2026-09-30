@@ -602,11 +602,12 @@ class EpubProcessor:
         spine = opf_soup.spine or (_ for _ in ()).throw(ValueError("OPF 文件缺少 spine 定义"))
         opf_dir = opf_path.parent
 
-        # 构建 spine 列表
+        # 构建 spine 列表 (按opf属性定位排除nav)
+        nav_paths = {p for p in EpubNCXGenerator.find_nav_path(opf_path).values() if p}
         spine_files = [(opf_dir/itm.get('href')).resolve() for ref in spine.find_all('itemref')
                     if (idr:=ref.get('idref')) and (itm:=opf_soup.find('item',id=idr))
                     and itm.get('media-type') in ['application/xhtml+xml', 'text/html']
-                    and (href:=itm.get('href')) and not href.lower().endswith('nav.xhtml')]
+                    and (href:=itm.get('href')) and (opf_dir/href).resolve() not in nav_paths]
         logger.debug(f"Spine文件列表: {spine_files}")
 
         toc = self._parse_toc(opf_soup,opf_path) # parse_toc决定优先使用nav
@@ -744,8 +745,9 @@ class EpubProcessor:
                                 skip_rules.append(part) # 默认作为排除规则
                     skip_re = re.compile('|'.join(skip_rules)) if skip_rules else None
                     include_re = re.compile('|'.join(include_rules)) if include_rules else None
-                    # 只处理 .xhtml/.html 文件，且排除 nav.xhtml 正则排除图片(匹配class或src)
-                    for html_file in [f for f in temp_dir_path.rglob('*') if f.suffix.lower() in ('.xhtml', '.html') and f.name.lower() != 'nav.xhtml']:
+                    # 只处理 .xhtml/.html 文件,按opf属性定位排除nav, 正则排除图片(匹配class或src)
+                    nav_paths = {p for p in EpubNCXGenerator.find_nav_path(self._get_opf_path(temp_dir_path)).values() if p}
+                    for html_file in [f for f in temp_dir_path.rglob('*') if f.suffix.lower() in ('.xhtml', '.html') and f.resolve() not in nav_paths]:
                         soup = BeautifulSoup(html_file.read_text('utf-8', 'ignore'), 'html.parser')
                         # 兼容查找常规 img 标签与 svg 内的 image 标签
                         for img in soup.find_all(['img', 'image']):
