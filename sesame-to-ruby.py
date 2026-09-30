@@ -1003,8 +1003,12 @@ class EpubProcessor:
         if not hasattr(self, "_fcache"): self._fcache = {}
         opf, new_toc, dep, s_rules = self._get_opf_path(Path(temp_dir)), [], 0, split_rules or []
         lookup = {t['href'].split('#')[0].split('/')[-1]: t for t in current_toc}
+        # nav/ncx为目录文档而非正文 排除避免正则命中landmarks等结构切坏nav(如里程碑标题)
+        meta_files = {p for p in EpubNCXGenerator.find_nav_path(opf).values() if p}
+        seen = set()  # (title, href)去重: 首行复用原文件时正则条目可能与既有条目(如あとがき自动补全)完全相同
         for hf in self._get_spine_ordered_files(opf):
-            if (n := hf.name) in lookup: new_toc.append(e := lookup.pop(n)); dep = e.get('depth', 0)
+            if hf.resolve() in meta_files: continue
+            if (n := hf.name) in lookup: new_toc.append(e := lookup.pop(n)); dep = e.get('depth', 0); seen.add((e.get('title', ''), e['href']))
             if not hf.exists(): continue
             if n not in self._fcache: self._fcache[n] = hf.read_text('utf-8', 'ignore')
             c = self._fcache[n]
@@ -1030,8 +1034,9 @@ class EpubProcessor:
                 use_orig = (i == 0 and is_empty_prefix)
                 spt_idx = i if is_empty_prefix else i + 1
                 href = cur_h if use_orig else f"{hf.stem}_spt_{spt_idx:03d}.xhtml"
-                new_toc.append({'title': t_clean or f"空条目 父级第{i+1}次分割", 
-                                'href': href, 'depth': dep + lvl - 1})
+                if (t_f := (t_clean or f"空条目 父级第{i+1}次分割", href)) not in seen:  # 跳过与既有条目完全相同的正则条目
+                    seen.add(t_f)
+                    new_toc.append({'title': t_f[0], 'href': href, 'depth': dep + lvl - 1})
         for remain_node in lookup.values(): new_toc.append(remain_node) # 保留失效条目
         return new_toc
 
@@ -1039,6 +1044,8 @@ class EpubProcessor:
         """正则匹配子章节追加分割逻辑"""
         if not (rules := getattr(self, '_split_rules', [])): return current_toc
         opf_p, total = self._get_opf_path(Path(temp_dir)), 0
+        # nav/ncx为目录文档而非正文 排除避免正则命中landmarks等结构切坏nav(如里程碑标题)
+        meta_files = {p for p in EpubNCXGenerator.find_nav_path(opf_p).values() if p}
         # 锚点按spine顺序向前寻找(命中lookup才更新), 找不到保持None走目录头部插入
         last_href = None
         regex = re.compile("|".join(f"(?:{r[0]})" for r in rules if r))
@@ -1048,6 +1055,7 @@ class EpubProcessor:
                '<head>\n<title>{t}</title>\n<link href="../css/style.css" rel="stylesheet" type="text/css"/>\n</head>\n'
                '<body>\n{c}\n</body>\n</html>')
         for hf in self._get_spine_ordered_files(opf_p):
+            if hf.resolve() in meta_files: continue
             if (n := hf.name) in lookup:
                 last_href = lookup[n]['href']; logger.opt(colors=True).debug(f"<e>父级起始锚点:</> {n} -> {last_href}")
             raw = hf.read_text('utf-8', 'ignore')
@@ -1084,9 +1092,14 @@ class EpubProcessor:
                 shref = cur_h if use_orig else (hf.parent / f"{sid}.xhtml").relative_to(opf_p.parent).as_posix()
                 if not use_orig:
                     (hf.parent / f"{sid}.xhtml").write_text(TPL.format(l=lang, t=title, c=raw[ivs[i]:ivs[i+1]].split("</body>")[0].strip()), 'utf-8')
+                # 去重后日志输出存在有nav没条目，ncx有条目的情况
+                if use_orig and lookup.get(n, {}).get('title', '') == t_clean:
+                    logger.opt(colors=True).debug(f"<r>跳过重复条目(首行复用):</r> <w>标题={t_clean}, 文件={n}, 与既有目录条目完全一致</w>")
+                    continue
                 s = {'id': sid.replace('.', '_'), 'href': shref, 'title': t_clean, 'depth': depth}
                 subs.append(s)
                 logger.debug(f"匹配条目{'(首行复用)' if use_orig else ''}: 标题={s['title']}, 层级={s['depth']}, 文件={shref.split('/')[-1]}")
+            if not subs: continue  # 全部跳过时无需写回OPF/目录, 且规避下方subs[-1]取默认值越界
             # OPF 原位插入(Manifest 紧跟原文件，Spine 保持顺序)
             soup = BeautifulSoup(opf_p.read_text('utf-8'), 'xml')
             if (old_it := soup.find('item', href=cur_h)) and (old_rf := soup.find('itemref', idref=old_it['id'])):

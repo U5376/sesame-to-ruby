@@ -12,7 +12,7 @@ class EpubNCXGenerator:
         """基于nav文件生成精确的NCX目录"""
         try:
             opf_dir = Path(opf_path).parent
-            paths = EpubNCXGenerator._find_nav_path(opf_path)
+            paths = EpubNCXGenerator.find_nav_path(opf_path)
             nav_path, ncx_path = paths['nav'], paths['ncx']
             target_ncx = opf_dir / 'toc.ncx'
 
@@ -124,8 +124,8 @@ class EpubNCXGenerator:
             return False, f"修改epub版本号失败: {e}"
 
     @staticmethod
-    def _find_nav_path(opf_path):
-        """查找nav和ncx文件路径 返回dict"""
+    def find_nav_path(opf_path):
+        """查找nav和ncx文件路径 返回dict (公开工具: 主程序分割/预览排除目录文档用)"""
         with open(opf_path, 'r', encoding='utf-8') as f:
             opf_soup = BeautifulSoup(f.read(), 'xml')
         opf_dir = Path(opf_path).parent
@@ -266,7 +266,7 @@ class EpubNCXGenerator:
         name_to_href = {Path(f).name: f for f in reversed(spine_files)}  # 文件名 -> spine href (O(1)查表; reversed保证重名时保留首个, 与原next()行为一致)
         html_hrefs = [i['href'] for i in opf_soup.find('manifest').find_all('item') if i.get('media-type') in ('text/html', 'application/xhtml+xml')]
         html_idx = {h: i for i, h in reversed(list(enumerate(html_hrefs)))}  # href -> 索引 O(1)查表(reversed保证重复href取首个, 与list.index()一致), 替代offset_src回调内随匹配数累积的O(n²)线性扫描
-        paths = EpubNCXGenerator._find_nav_path(opf_path)
+        paths = EpubNCXGenerator.find_nav_path(opf_path)
         nav_path, ncx_path = paths.get('nav'), paths.get('ncx')
         ncx_changed, nav_changed, opf_changed = False, False, False  # opf_changed: del_orphan_c0移除manifest/guide条目后需写回OPF
 
@@ -495,13 +495,22 @@ class EpubNCXGenerator:
     @staticmethod
     def insert_sub_chapters(opf_path, parent_href, sub_chapters):
         """插入子章节(相对层级: 1=父节点的同级节点, 2=父节点的子节点)"""
-        if not sub_chapters or not (ps := EpubNCXGenerator._find_nav_path(opf_path)): return 0
+        if not sub_chapters or not (ps := EpubNCXGenerator.find_nav_path(opf_path)): return 0
         # 有锚点按文件名定位父节点, 无锚点(None)由inject头部插入分支处理
         target_fn = Path(parent_href.split('#')[0]).name if parent_href else None
         added_this_time = 0
+        # 文档级去重键(标题, 去锚点文件名)
+        s_key = lambda s: (s['title'].strip(), Path(s['href'].split('#')[0]).name)
+        _all_subs = sub_chapters  # 原始列表备份(ncx/nav两侧各自独立过滤, 互不影响)
         # ncx 处理：解析 -> 内存递归插入 -> 重写ncx格式.按顺序根据depth相对插入同级或次级条目
         if (nx_p := ps.get('ncx')) and nx_p.exists():
             entries = EpubNCXGenerator._parse_ncx_to_entries(nx_p)
+            # ncx已有同标题同文件条目时过滤(如源书带#锚点的章节), 避免nav/ncx覆盖度不一致时ncx写入重复条目
+            _flat = lambda ns: [e for n in ns for e in [n, *_flat(n.get('children') or [])]]
+            dup = {(e['title'].strip(), Path(e['href'].split('#')[0]).name) for e in _flat(entries)}
+            for s in _all_subs:
+                if s_key(s) in dup: logger.opt(colors=True).debug(f"<r>ncx去重跳过</r> <w>标题: {s['title']}, 路径: {s['href']}</w>")
+            sub_chapters = [s for s in _all_subs if s_key(s) not in dup]
             def inject(nodes):
                 # 递归查找锚点节点并相对插入; 锚点为None时头部插入nodes最前面(仅顶层调用时nodes=entries)
                 if target_fn is None: # 无锚点(None)头部插入 按sub_chapters原序插到头部(2级挂靠前一条1级,无则退化顶级)
@@ -523,7 +532,7 @@ class EpubNCXGenerator:
                             cnt += 1
                         return cnt
                     if n.get('children') and (res := inject(n['children'])) is not None: return res
-            if (cnt := inject(entries)) is not None:
+            if sub_chapters and (cnt := inject(entries)) is not None:
                 nx_p.write_text(EpubNCXGenerator._create_ncx_content(EpubNCXGenerator._get_uid_from_opf(opf_path), entries, 
                                 EpubNCXGenerator._get_book_title_from_opf(opf_path)), 'utf-8')
                 logger.opt(colors=True).debug(f"<g>ncx:在 {target_fn}</> 后续追加 {cnt} 个章节" if target_fn else f"<y>ncx:目录头部(无锚点)</>追加 {cnt} 个章节")
@@ -535,8 +544,14 @@ class EpubNCXGenerator:
             # 获取OPF所在目录, 用于将OPF相对路径转换为相对nav的路径
             opf_dir = Path(opf_path).parent.resolve()
             rel = lambda h: (opf_dir / h).resolve().relative_to(nv_p.parent).as_posix()
-            # 根据锚点定位父节点, 无锚点由elif处理
-            if target_fn and (ta := sp.find('a', href=lambda h: h and Path(h.split('#')[0]).name == target_fn)) and (cur_li := ta.parent):
+            # 锚点定位仅限toc导航区, 避免命中landmarks等其他nav内的链接影响其结构
+            toc_nav = sp.find('nav', {'epub:type': 'toc'}) or sp.find('nav', {'role': 'doc-toc'})
+            # nav文档级去重: 已有同标题同文件条目时过滤
+            n_exist = {(a.get_text(strip=True), Path(a['href'].split('#')[0]).name) for a in toc_nav.find_all('a', href=True)} if toc_nav else set()
+            for s in _all_subs:
+                if s_key(s) in n_exist: logger.opt(colors=True).debug(f"<r>nav去重跳过</r> <w>标题: {s['title']}, 路径: {s['href']}</w>")
+            sub_chapters = [s for s in _all_subs if s_key(s) not in n_exist]
+            if target_fn and sub_chapters and toc_nav and (ta := toc_nav.find('a', href=lambda h: h and Path(h.split('#')[0]).name == target_fn)) and (cur_li := ta.parent):
                 cur_ol, cnt = cur_li.find(['ol', 'ul']), 0
                 for s in sub_chapters:
                     (nl := sp.new_tag('li')).append(sp.new_tag('a', href=rel(s['href']), string=s['title'])) # href经rel()转换
@@ -552,7 +567,7 @@ class EpubNCXGenerator:
                     nv_p.write_text(sp.decode(formatter='html'), 'utf-8')
                     logger.opt(colors=True).debug(f"<g>nav:在 {target_fn} 后续追加 {cnt} 个章节</>")
                     added_this_time = max(added_this_time, cnt)
-            elif not target_fn and (toc_nav := sp.find('nav', {'epub:type': 'toc'}) or sp.find('nav', {'role': 'doc-toc'})) and (root := toc_nav.find(['ol', 'ul'])): # 无锚点头部插入 定位toc根列表
+            elif not target_fn and sub_chapters and toc_nav and (root := toc_nav.find(['ol', 'ul'])): # 无锚点头部插入 定位toc根列表
                 prev_top, cnt = None, 0 # prev_top:前一条1级条目(2级挂靠对象)
                 for s in sub_chapters:
                     (nl := sp.new_tag('li')).append(sp.new_tag('a', href=rel(s['href']), string=s['title'])) # href经rel()转换
