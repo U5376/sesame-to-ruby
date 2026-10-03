@@ -146,10 +146,15 @@ class ClassList:
                 except Exception as e: 
                     logger.exception(f"拖入文件处理发生错误: {e}")
                     messagebox.showerror("错误", str(e), parent=cw)
-            # 拖出处理函数 (强制恢复视觉状态：利用锁定集合覆盖系统当前的单选状态)
+            # 拖出处理函数
             def drag_out_handler(event):
-                # 0.5秒抖动延时判定，防止误触发拖出
-                if time.time() - getattr(drag_out_handler, 'press_t', 0) < 0.5:
+                # 双击预览的DragInit由preview_file设suppress标志拦截(一次性)
+                if getattr(drag_out_handler, 'suppress_drag', False):
+                    drag_out_handler.suppress_drag = False
+                    ftree.tk.call('set', '::tkdnd::_state', 'press'); return "break"
+                # 0.5秒内刚按下过则视为点击 非拖拽
+                pt = getattr(drag_out_handler, 'press_t', None)
+                if pt is not None and time.time() - pt < 0.5:
                     ftree.tk.call('set', '::tkdnd::_state', 'press'); return "break"
                 if self._dragging: return "break"
                 self._dragging = True # 上锁
@@ -173,14 +178,15 @@ class ClassList:
                     messagebox.showerror("导出错误", str(ex), parent=cw); return "break"
                 finally: # 延迟解锁，给 UI 响应留出缓冲时间
                     cw.after(500, lambda: setattr(self, '_dragging', False))
-            # 绑定：锁定多选逻辑
+            # 锁定多选: Button-1按下时记录选中集 供DragInit恢复(防tkdnd重置)
             ftree.bind("<<TreeviewSelect>>", lambda e: setattr(drag_out_handler, 'last_sel', ftree.selection()))
-            # Button-1 按下时，如果点击项在已选集中，则立即锁定整个集合防止 DND 启动时重置
             def lock_sel(e):
-                drag_out_handler.press_t = time.time() # 抖动延时
+                drag_out_handler.press_t = time.time()
                 rid, l_sel = ftree.identify_row(e.y), getattr(drag_out_handler, 'last_sel', ())
                 setattr(drag_out_handler, 'locked_sel', l_sel if rid in l_sel else (rid,))
             ftree.bind("<Button-1>", lock_sel, add="+")
+            # 兜底: toplevel层记录按下时刻 防tkdnd在widget层break掉lock_sel
+            cw.bind("<Button-1>", lambda e: setattr(drag_out_handler, 'press_t', time.time()), add="+")
 
             # 注册拖放事件
             ftree.drop_target_register(DND_FILES); ftree.dnd_bind("<<Drop>>", drop_handler)
@@ -216,6 +222,10 @@ class ClassList:
 
         # 预览逻辑+搜索框
         def preview_file(e):
+            if DND_FILES:
+                ftree.tk.call('set', '::tkdnd::_state', 'press')  # 重置tkdnd状态机
+                drag_out_handler.suppress_drag = True  # 一次性拦截下次DragInit(防双击预览误触发拖出)
+                cw.after(2000, lambda: setattr(drag_out_handler, 'suppress_drag', False))
             if not (sel := ftree.selection()) or not ftree.exists(sel[0]) or not (p := ftree.item(sel[0], "tags")[0]) or p.endswith('/'): return
             try:
                 mtime = os.path.getmtime(self.epub_path)
