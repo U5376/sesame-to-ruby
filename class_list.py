@@ -15,11 +15,19 @@ from loguru import logger
 from tkinterdnd2 import DND_FILES
 
 class ClassList:
-    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, workers_cfg='Auto', win_size=None):
+    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, workers_cfg='Auto', win_size=None, text_search_terms=None, style_filter_terms=None, save_cfg=None, text_search_history=None, style_filter_history=None):
         self.root, self.epub_path = root, epub_path
         self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
         self.workers_cfg = workers_cfg
         self.win_size = win_size
+        # 下拉词条为内存记忆 持久化仅在自定义搜索对话框手动保存时触发(复用主程序save_app_settings)
+        self.text_search_terms = text_search_terms if text_search_terms is not None else []
+        self.style_filter_terms = style_filter_terms if style_filter_terms is not None else []
+        # 历史(纯内存 不持久化) 由主程序持有 跨ClassList实例共享 关窗/换配置不丢失
+        self.text_search_history = text_search_history if text_search_history is not None else []
+        self.style_filter_history = style_filter_history if style_filter_history is not None else []
+        self.save_cfg = save_cfg
+        self._search_boxes, self._style_boxes = [], []  # 存活的搜索/筛选下拉框引用 用于词条变更后刷新
         self.style_data, self.samples_data, self.counts_data, self.img_counts = {}, {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
         self.all_items_refs, self.n_map, self.st = [], {"": ""}, {"#0": False, "count": False}
@@ -31,8 +39,98 @@ class ClassList:
         self.sesame_root = Path(tempfile.gettempdir(), "sesame_cache"); self.sesame_root.mkdir(parents=True, exist_ok=True)
         self.show_class_list()
 
+    @staticmethod
+    def _add_clear_btn(combo, on_clear=None):
+        """在Combobox下拉箭头左侧叠加✕按钮 快速清空输入 (无背景色差 沿用默认字体与前景色)"""
+        # 从ttk样式取Combobox真实底色 融入背景消除色差 取不到则回退白色
+        bg = ttk.Style().lookup("TCombobox", "fieldbackground") or "#ffffff"
+        btn = tk.Button(combo, text="✕", relief="flat", bd=0, overrelief="flat", takefocus=0,
+                        bg=bg, activebackground=bg, cursor="hand2", highlightthickness=0,
+                        command=lambda: (combo.set(""), on_clear() if on_clear else None))
+        btn.place(relx=1.0, rely=0.5, x=-36, y=-7, width=15, height=14)
+
+    # 下拉列表中分隔固定词条与临时(历史)词条的横线 选中时会被识别并跳过
+    _SEP_LINE = "─" * 24
+
+    def _combo_values(self, fixed_terms, history):
+        """下拉词条: 自定义词条 + 分隔横线 + 历史(新记录排末尾)"""
+        fixed = list(fixed_terms)
+        slots = max(0, 20 - len(fixed))
+        hist = [h for h in history if h not in fixed][-slots:] if slots else []
+        sep = [self._SEP_LINE] if fixed and hist else []
+        return (fixed + sep + hist)[:20]
+
+    def _record_history(self, q, history):
+        """记录历史(去重追加到末尾 上限20条 仅内存)"""
+        if not q: return
+        if q in history: history.remove(q)
+        history.append(q)
+        if len(history) > 20: del history[:-20]
+        self._refresh_search_boxes()
+
+    def _bind_sep_combo(self, combo, parent, boxes_list, on_select=None, on_clear=None):
+        """为组合框绑定分隔横线处理: 选中横线还原输入, 其余调on_select; 自动注册清空按钮与销毁清理"""
+        prev = [""]
+        def on_sel(_e):
+            v = combo.get()
+            if v == self._SEP_LINE:
+                combo.set(prev[0]); return
+            prev[0] = v
+            if on_select: on_select()
+        combo.bind("<<ComboboxSelected>>", on_sel)
+        combo.bind("<KeyRelease>", lambda e: prev.__setitem__(0, combo.get()), add="+")
+        boxes_list.append(combo)
+        self._add_clear_btn(combo, on_clear)
+        parent.bind("<Destroy>", lambda e: boxes_list.remove(combo) if combo in boxes_list else None, add="+")
+
+    def _refresh_search_boxes(self):
+        """刷新所有存活搜索/筛选下拉框的词条"""
+        for boxes, terms in ((self._search_boxes, self._combo_values(self.text_search_terms, self.text_search_history)),
+                             (self._style_boxes, self._combo_values(self.style_filter_terms, self.style_filter_history))):
+            for w in boxes[:]:
+                try:
+                    if w.winfo_exists(): w["values"] = terms
+                    else: boxes.remove(w)
+                except tk.TclError:
+                    boxes.remove(w)
+
+    def edit_search_cfg(self):
+        """自定义搜索: 手动编辑正文搜索与样式筛选的下拉词条(保存写入当前配置)"""
+        parent = getattr(self, '_cw', self.root)
+        d = tk.Toplevel(parent)
+        d.title("自定义搜索词条"); d.transient(parent)
+        if self.win_size:
+            rec = self.win_size.setup(d, "search_cfg_editor", f"380x420+{self.root.winfo_x()+80}+{self.root.winfo_y()+80}", mode='cascade')
+            d.bind('<Configure>', rec, add='+')
+        d.protocol("WM_DELETE_WINDOW", d.destroy); d.focus_force()
+        d.minsize(340, 220)  # 保底尺寸 防止记录的窗口几何过小压没按钮区
+        # 先pack底部按钮区(side="bottom") 再pack文本框 保证任意窗口尺寸下按钮始终可见
+        row = ttk.Frame(d); row.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+        def read_terms(t):
+            return list(dict.fromkeys(l for l in (x.strip() for x in t.get("1.0", "end").splitlines()) if l))
+        def save_entries():
+            self.text_search_terms[:] = read_terms(text_search_box)
+            self.style_filter_terms[:] = read_terms(style_filter_box)
+            self._refresh_search_boxes()
+            # 沿用主程序保存功能(唯一写config.ini路径) 与其它设置一起原子写入
+            if self.save_cfg:
+                try: self.save_cfg()
+                except Exception as e: logger.error(f"保存搜索词条失败: {e}")
+            d.destroy()
+        ttk.Button(row, text="保存", width=5, command=save_entries).pack(side="right")
+        ttk.Button(row, text="关闭", width=5, command=d.destroy).pack(side="right", padx=(0, 5))
+        ttk.Label(d, text="正文搜索词条 (每行一条)").pack(side="top", anchor="w", padx=8, pady=(8, 0))
+        text_search_box = tk.Text(d, font=('Consolas', 10), undo=True, height=6)
+        text_search_box.pack(fill="both", expand=True, padx=8, pady=4)
+        text_search_box.insert("1.0", "\n".join(self.text_search_terms))
+        ttk.Label(d, text="样式筛选词条 (每行一条)").pack(side="top", anchor="w", padx=8)
+        style_filter_box = tk.Text(d, font=('Consolas', 10), undo=True, height=6)
+        style_filter_box.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        style_filter_box.insert("1.0", "\n".join(self.style_filter_terms))
+
     def show_class_list(self):
         cw = tk.Toplevel(self.root)
+        self._cw = cw  # 供自定义搜索对话框等定位父窗口
         cw.title("html内样式收集分析")
         def on_class_list_close():
             self._running = False
@@ -63,7 +161,14 @@ class ClassList:
             except Exception:
                 logger.warning("cw.unbind('<Destroy>') 失败")
             clean_old_epub_cache()  # 关闭时清理旧缓存
-            cw.destroy()
+            # 逐个销毁子组件容错TclError: tkdnd已删widget的Tcl命令, Tkinter再删报错中断destroy致僵尸窗口, 故逐个销毁再兜底destroy主窗
+            for c in list(cw.children.values()):
+                try: c.destroy()
+                except tk.TclError: pass
+            try:
+                cw.destroy()
+            except tk.TclError as e:
+                logger.warning(f"主窗口销毁告警(可忽略): {e}")
         cw.protocol("WM_DELETE_WINDOW", on_class_list_close)
         rec = self.win_size.setup(cw, "class_list_main", f"600x480+{self.root.winfo_x()+30}+{self.root.winfo_y()+30}", mode='cascade')
         cw.bind('<Configure>', rec, add='+')
@@ -93,6 +198,7 @@ class ClassList:
                 logger.exception(f"保存epub失败: {e}"); messagebox.showerror("保存失败", str(e), parent=cw)
         
         ttk.Button(lf_top, text="保存", width=5, command=save_changes).pack(side="right")
+        ttk.Button(lf_top, text="搜索词条", width=8, command=self.edit_search_cfg).pack(side="right", padx=(0, 4))
         lf_tree_frame = ttk.Frame(lf); lf_tree_frame.pack(fill="both", expand=True, padx=(3, 0), pady=2)
         # 添加一个隐藏列用于右对齐显示图片计数，设置 width 并禁止拉伸
         ftree = ttk.Treeview(lf_tree_frame, show="tree", selectmode="extended", columns=("img_count",))
@@ -195,18 +301,28 @@ class ClassList:
         # 右侧class列表
         filter_frame = ttk.Frame(rf); filter_frame.pack(fill="x", padx=(0, 3), pady=2)
         filter_var = tk.StringVar()
-        ttk.Entry(filter_frame, textvariable=filter_var).pack(side="left", fill="x", expand=True)
+        # 样式筛选改为可编辑下拉组合框(自定义词条+筛选历史 仅内存)
+        fb = ttk.Combobox(filter_frame, textvariable=filter_var, values=self._combo_values(self.style_filter_terms, self.style_filter_history))
+        fb.pack(side="left", fill="x", expand=True)
+        self._bind_sep_combo(fb, cw, self._style_boxes)  # 筛选由textvariable的trace自动触发do_filter
         tf = ttk.Frame(rf); tf.pack(fill="both", expand=True, padx=(0, 3), pady=2)
         tree = ttk.Treeview(tf, columns=("count",), show="tree headings", selectmode="extended")
 
         # 排序逻辑函数
         self.lc = None
-        def sort_col(col):
-            self.st[col], self.lc = ((col == "#0") if col != self.lc else not self.st[col]), col
+        def apply_sort():
+            col = self.lc or "#0"
+            # 未点过表头时默认类名升序(与初始插入时的字母顺序重排一致)
+            reverse = not self.st[col] if self.lc else False
             for n in nodes.values():
-                items = sorted([(tree.set(c, "count"), tree.item(c, "text"), c) for c in tree.get_children(n)], key=lambda x: int(x[0]) if col=="count" else x[1].lower(), reverse=not self.st[col])
+                items = sorted([(tree.set(c, "count"), tree.item(c, "text"), c) for c in tree.get_children(n)], key=lambda x: int(x[0]) if col=="count" else x[1].lower(), reverse=reverse)
                 [tree.move(it[2], n, i) for i, it in enumerate(items)]
-            [tree.heading(c, text=f"{'类名' if c=='#0' else '总量'}{(' ▲' if self.st[c] else ' ▼') if c==col else ''}") for c in ["#0", "count"]]
+            # 表头箭头指示: 仅在点过表头后显示 默认状态(含筛选/清空后)无箭头
+            [tree.heading(c, text=f"{'类名' if c=='#0' else '总量'}{(' ▲' if self.st[c] else ' ▼') if c==self.lc else ''}") for c in ["#0", "count"]]
+        def sort_col(col):
+            # 首次点击即切换到当前默认排序的反向(类名默认升序→首点降序▼ 总量默认降序→首点升序▲) 再点切回
+            self.st[col], self.lc = ((col != "#0") if col != self.lc else not self.st[col]), col
+            apply_sort()
 
         # 初始表头设置
         [tree.heading(c, text=t, anchor=a, command=lambda _c=c: sort_col(_c)) for c, t, a in [("#0", "类名", "w"), ("count", "总量", "center")]]
@@ -278,11 +394,15 @@ class ClassList:
                 def validate_entry(new_value):
                     return len(new_value) <= 1000
                 vcmd = (win.register(validate_entry), '%P')
-                se = ttk.Entry(sf, validate="key", validatecommand=vcmd); se.pack(side="left", fill="x", expand=1)
+                # 正文搜索框改为可编辑下拉组合框(自定义词条+搜索历史 仅内存)
+                se = ttk.Combobox(sf, validate="key", validatecommand=vcmd, values=self._combo_values(self.text_search_terms, self.text_search_history))
+                se.pack(side="left", fill="x", expand=1)
+                se.bind("<Return>", lambda e: do_find(reset=True))  # 回车触发搜索(历史由do_find延迟1秒记录)
+                self._bind_sep_combo(se, win, self._search_boxes, on_select=lambda: do_find(reset=True), on_clear=lambda: do_find(reset=True))
                 
                 # 全局搜索复选框
                 global_search_var = tk.BooleanVar(value=False)
-                # 勾选切换时强制重扫但不导航跳转(避免把用户"弹回"到结果1所在的文件)
+                # 勾选切换时强制重扫但不导航跳转(避免把用户"弹回"到结果1所在的文件) 重扫后同步回切换前的匹配位置
                 ttk.Checkbutton(sf, text="全局匹配", variable=global_search_var, command=lambda: do_find(reset=True, force=True, navigate=False)).pack(side="left", padx=5)
                 sl = ttk.Label(sf, text="0/0"); sl.pack(side="right", padx=5)
                 [ttk.Button(sf, text=t, width=3, command=lambda r=v: do_find(rev=r)).pack(side="right") for t, v in [("↓", 0), ("↑", 1)]]
@@ -293,6 +413,8 @@ class ClassList:
                 [txt.tag_config(k, background=v) for k,v in [("m", "yellow"), ("cur", "orange")]]
                 # 匹配opacity块提供灰字高亮标签(之后估摸会做自定义列表?)
                 txt.tag_config("opacity_hint", foreground="#7E7A7A")
+                # sel(系统选中)提至最高优先级，避免选中标黄文本会难以辨别文字(白字黄底)
+                txt.tag_raise("sel")
 
                 # --- 异步多线程匹配：调用 workers_cfg 设置线程数并分块并行处理长文 ---
                 def async_render_opacity(content, fpath):
@@ -410,9 +532,14 @@ class ClassList:
                 # 高亮异步分批渲染: 接收传入的 content 文本以供行列计算
                 def paint_m_async(content):
                     key = (state.get("last_q"), state["current_file"])
-                    if state.get("painted") == key: return  # 同文件同查询:已刷/正在刷,不重复
-                    state["painted"] = key
                     spans = state.get("by_file", {}).get(state["current_file"], ())
+                    # 同文件同查询且已有匹配:已刷/正在刷,不重复
+                    if spans and state.get("painted") == key: return
+                    if not spans:
+                        # 无匹配仅清黄标不记录painted: 若提前记录, 后续扫描出的匹配会被去重守卫拦截致黄标画不上
+                        txt.tag_remove("m", "1.0", "end")
+                        return
+                    state["painted"] = key
                     txt.tag_remove("m", "1.0", "end")
                     state["paint_token"] = token = state.get("paint_token", 0) + 1
                     def batch(i=0, step=400):  # 400个匹配项一批 分批渲染
@@ -425,13 +552,30 @@ class ClassList:
 
                 # 执行正则搜索定位，支持全局匹配与高亮
                 def do_find(rev=False, reset=False, navigate=True, force=False):
-                    if not (q := se.get()):
+                    q = se.get()
+                    if not q:
+                        # 清空查询: 取消挂起记录 清除高亮
+                        hid = state.pop('hist_id', None)
+                        if hid is not None:
+                            try: win.after_cancel(hid)
+                            except Exception: pass
                         txt.tag_remove("m", "1.0", "end"); txt.tag_remove("cur", "1.0", "end")
+                        state.pop("keep_pos", None)  # 彻底清空查询:位置记忆一并作废
                         state.update({"last_q": None, "results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
                         return sl.config(text="0/0")
-                    
-                    # 当且仅当查询词改变或强制时才清空缓存池，否则只做增量追加
-                    if force or q != state["last_q"]:
+
+                    # 仅查询变化时取消旧挂起并重置缓存(导航同查询不碰计时器 避免连续导航永不记录)
+                    is_new = force or q != state["last_q"]
+                    keep = None  # 必须先初始化: 非新查询的导航调用也会走后续同步分支
+                    if is_new:
+                        # 记忆当前匹配(文件+起点)到state: 中间态会重置index致记忆丢失, 跨调用存keep_pos续接
+                        if 0 <= state["search_index"] < len(state["results"]):
+                            state["keep_pos"] = state["results"][state["search_index"]]
+                        keep = state.get("keep_pos")  # 局部变量续接上次有效位置(可能来自多轮删除前)
+                        hid = state.pop('hist_id', None)
+                        if hid is not None:
+                            try: win.after_cancel(hid)
+                            except Exception: pass
                         state.update({"last_q": q, "results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
                         
                     try:
@@ -441,8 +585,17 @@ class ClassList:
                                 all_valid = sorted({f for f in nl + list(self.modified_files.keys()) if f.endswith((".html", ".xhtml"))})
                                 state["file_pos"] = {f: i for i, f in enumerate(all_valid)}
 
-                            s_files = sorted({f for f in (nl if global_search_var.get() else [state["current_file"]]) + list(self.modified_files.keys()) 
+                            # 非全局时扫描域限定当前文件: 异文件条目会走file_pos跳到别的文件(span超长被clamp到末尾), 故排除
+                            if global_search_var.get():
+                                cand = list(nl) + list(self.modified_files.keys())
+                            else:
+                                cand = [state["current_file"]] + [p for p in self.modified_files if p == state["current_file"]]
+                            s_files = sorted({f for f in cand
                                             if f.endswith((".html", ".xhtml")) and (f in nl or self.modified_files.get(f) is not None)})
+                            
+                            # 非全局: 结果域过滤到当前文件双保险拦截残留(modified泄漏/状态遗留), 过滤后补扫无重复计算
+                            if not global_search_var.get():
+                                state["results"] = [r for r in state["results"] if r[0] == state["current_file"]]
                             
                             new_matches = False
                             for f in s_files:
@@ -456,13 +609,28 @@ class ClassList:
                             
                             if new_matches:
                                 state["results"].sort(key=lambda x: (state["file_pos"].get(x[0], 9999), x[1]))
+                            # 全局扫描挤出LRU缓存(上限15)致content取空、高亮落1.0, 扫描后回读当前文件
+                            if state["current_file"] and state["current_file"] not in state["html_cache"]:
+                                get_cached_content(state["current_file"], z)
                     except Exception as e: 
                         logger.error(f"正则搜索失败: {e}")
+                        # 中间态正则(如[^未闭合)报错直接返回, 清除过期高亮并重置绘制状态
+                        txt.tag_remove("m", "1.0", "end"); txt.tag_remove("cur", "1.0", "end")
+                        state.update({"results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
                         return sl.config(text="Err")
                     
                     res = state["results"]
                     content = state["html_cache"].get(state["current_file"], "")
-                    
+
+                    # 仅新查询时挂起记录(导航不重置计时 1秒后照常记录)
+                    if is_new:
+                        state['hist_id'] = win.after(1000, lambda q=q: self._record_history(q, self.text_search_history))
+
+                    # 重扫后同步记忆位置: 同文件取起点最近邻(span删改后漂移精确相等常失配); 比较取span[0]起点; 无匹配则置-1回落定位模式
+                    if keep is not None:
+                        cands = [(i, r[1][0]) for i, r in enumerate(res) if r[0] == keep[0]]
+                        state["search_index"] = min(cands, key=lambda t: abs(t[1] - keep[1][0]))[0] if cands else -1
+
                     if not res:
                         paint_m_async(content)
                         return sl.config(text="0/0")
@@ -481,8 +649,8 @@ class ClassList:
                                                               if state["file_pos"].get(f, -1) > cur_pos), 0)
                         else:
                             state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(res)
-                    elif state["search_index"] < 0 or res[state["search_index"]][0] != state["current_file"]:
-                        # 定位模式:索引还没落在当前文件时,找当前文件的第一条结果(找不到就不跳)
+                    elif not (0 <= state["search_index"] < len(res)) or res[state["search_index"]][0] != state["current_file"]:
+                        # 定位模式:索引无效(未初始化/已越界)或未落在当前文件时,找当前文件的第一条结果(找不到就不跳)
                         state["search_index"] = next((i for i, (f, _) in enumerate(res) if f == state["current_file"]), -1)
                         
                     if state["search_index"] < 0:  # 当前文件无匹配:显示总数但不强行跳走
@@ -503,22 +671,61 @@ class ClassList:
                     paint_m_async(content)
                     sl.config(text=f"{state['search_index'] + 1}/{len(res)}")
 
-                # 批量绑定快捷键：左右键切换文件，上下键切换搜索结果，输入框自动防抖搜索
+                # 快捷键: ←→切换文件 ↑↓切换结果 输入防抖搜索; 焦点沿master链判定(下拉展开时焦点在弹层Toplevel), 仅判focus_get() is se会漏判致方向键误触
+                def focus_in_search():
+                    w = win.focus_get()
+                    while w is not None:
+                        if w is se: return True
+                        try: w = w.master
+                        except Exception: return False
+                    return False
                 def on_switch(rev, _e):
-                    if win.focus_get() is se: return
+                    if focus_in_search(): return
                     nxt = get_next_text(rev)
                     ftree.selection_set(nxt); ftree.see(nxt)
                     load_content_to_text(ftree.item(nxt, "tags")[0])
                     do_find(reset=True, navigate=False)  # 只定位不高跳
                 def on_nav(rev, _e):
-                    if win.focus_get() is se: return
+                    if focus_in_search(): return
                     do_find(rev=rev)
                 win.bind("<Left>",  lambda e, r=1: on_switch(r, e))
                 win.bind("<Right>", lambda e, r=0: on_switch(r, e))
                 win.bind("<Up>",    lambda e, r=1: on_nav(r, e))
                 win.bind("<Down>",  lambda e, r=0: on_nav(r, e))
-                # 防抖触发也改成 navigate=False(输入时只刷新高亮定位,不跳文件)
-                (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(500, lambda: do_find(reset=True, navigate=False)))))
+                # 弹层展开时持全局grab吞掉正文Button-1; 改绑<<Unpost>>: 关闭时若指针在正文区则多档延迟夺焦(组合框Unpost后可能异步再抢); 列表选中时弹层也关闭, 用"最近选中"标记排除以保持搜索焦点
+                _sel_at = [0.0]
+                se.bind("<<ComboboxSelected>>", lambda e: _sel_at.__setitem__(0, time.monotonic()), add="+")
+                # 延迟夺焦带销毁防护: 预览窗关闭后挂起after仍触发, 对已销毁txt执行focus_set抛TclError, 先查存活
+                def _grab_txt():
+                    try:
+                        if txt.winfo_exists(): txt.focus_set()
+                    except tk.TclError: pass
+                def on_unpost(_e=None):
+                    try:
+                        if not win.winfo_exists() or time.monotonic() - _sel_at[0] < 0.25: return
+                    except tk.TclError: return
+                    mx, my = win.winfo_pointerxy()
+                    if sf.winfo_rooty() + sf.winfo_height() <= my < win.winfo_rooty() + win.winfo_height() \
+                       and win.winfo_rootx() <= mx < win.winfo_rootx() + win.winfo_width():
+                        _grab_txt()
+                        [win.after(d, _grab_txt) for d in (10, 60, 150)]
+                se.bind("<<Unpost>>", on_unpost, add="+")
+                # 兜底:部分Tk版本点击外部关闭弹层不产生<<Unpost>> 轮询弹层mapped状态转移捕捉关闭时刻
+                def _poll_popdown():
+                    try:
+                        if not win.winfo_exists(): return
+                    except tk.TclError: return
+                    try:
+                        mapped = bool(int(se.tk.call('winfo', 'ismapped',
+                                    se.tk.call('::ttk::combobox::PopdownWindow', str(se)))))
+                    except Exception:
+                        mapped = False
+                    if getattr(_poll_popdown, 'was', False) and not mapped: on_unpost(None)
+                    _poll_popdown.was = mapped
+                    win.after(100, _poll_popdown)
+                _poll_popdown()
+                # 防抖触发也改成 navigate=False(输入时只刷新高亮定位,不跳文件) 200ms防抖兼顾输入流畅与残留清理
+                (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(200, lambda: do_find(reset=True, navigate=False)))))
                 
                 # 打开窗口默认焦点强行切到 txt(文本预览区域)
                 txt.focus_set()
@@ -777,6 +984,7 @@ class ClassList:
         tree.bind("<Button-3>", on_right_click)
 
         # 筛选功能：支持正则表达式（忽略大小写），输入非法正则时回退为普通子串匹配
+        _filter_hist_id = [None]; _last_filter_q = [None]
         def do_filter(*_):
             keyword = filter_var.get().strip()
             try: match = (lambda s: re.search(keyword, s, re.IGNORECASE)) if keyword else None
@@ -789,7 +997,14 @@ class ClassList:
                 # 执行综合匹配：关键词为空、匹配类名或匹配 CSS 内容
                 if not keyword or match(cls) or any(match(t) for t in css_texts):
                     tree.reattach(iid, nodes[group], "end")
-        filter_var.trace_add("write", do_filter)
+            apply_sort()  # 筛选/清空后保持排序 未点过表头则按默认类名升序(与初始一致)
+            # 延迟记录筛选历史(新查询1秒后记录 与正文搜索一致)
+            if keyword != _last_filter_q[0]:
+                _last_filter_q[0] = keyword
+                if _filter_hist_id[0] is not None:
+                    try: cw.after_cancel(_filter_hist_id[0])
+                    except Exception: pass
+                _filter_hist_id[0] = cw.after(1000, lambda q=keyword: self._record_history(q, self.style_filter_history)) if keyword else None
 
         # 编辑临时样式：弹出一个可编辑的Text窗口，显示全部暂存样式，编辑后自动保存
         def edit_temp_style():

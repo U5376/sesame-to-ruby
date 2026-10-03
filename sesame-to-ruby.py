@@ -391,6 +391,9 @@ class EpubProcessor:
         base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
         self.config_file = base_dir / "config.ini"
         self.win_size = WinSize(self.config_file)
+        # 搜索框下拉词条: 内存记忆为主 不自动保存 仅手动保存(自定义搜索对话框或主程序保存按钮)时写入config
+        self.text_search_terms, self.style_filter_terms = [], []
+        self.text_search_history, self.style_filter_history = [], []
         self.log_level_var = self._settings_vars_dict.setdefault('log_level', tk.StringVar(value="info"))
         self.load_app_settings()
         recorder = self.win_size.setup(root, "main", "350x620+600+160")
@@ -1178,7 +1181,10 @@ class EpubProcessor:
                   lambda v: setattr(self, 'temp_style_content', v), 
                   lambda v: setattr(self, 'temp_style_content', self.temp_style_content + v),
                   self._settings_vars_dict['max_workers_var'].get(),
-                  self.win_size)
+                  self.win_size,
+                  self.text_search_terms, self.style_filter_terms,
+                  self.save_app_settings,
+                  self.text_search_history, self.style_filter_history)
 
     def save_app_settings(self, return_config=False):
         """保存到配置文件，或返回ConfigParser对象"""
@@ -1187,6 +1193,11 @@ class EpubProcessor:
         if self.win_size._states: self.win_size.save(config)
         if entries := getattr(self, 'excluded_toc_entries', []):
             config['ExcludeTocEntries'] = {str(i): f"{t}|{h}" for i, (t, h) in enumerate(entries)}
+        if getattr(self, 'text_search_terms', None) or getattr(self, 'style_filter_terms', None):
+            # 词条内含正则的|时用\|转义 分隔符仍为|
+            esc = lambda items: '|'.join(t.replace('|', '\\|') for t in items)
+            config['SearchBox'] = {'text_terms': esc(self.text_search_terms),
+                                   'style_terms': esc(self.style_filter_terms)}
         if return_config: return config
         try:
             import io
@@ -1201,7 +1212,7 @@ class EpubProcessor:
         """用 configparser 读取配置（跳过正则段）"""
         if not self.config_file.exists(): return logger.warning(f"配置文件不存在: {self.config_file}")
         try:
-            config = configparser.ConfigParser()
+            config = configparser.ConfigParser(interpolation=None)  # 关闭插值 防止词条含%时读取报错
             config.read_string(self.config_file.read_text('utf-8').split('[RegexRules]', 1)[0])
             if 'AppSettings' in config:
                 sec = config['AppSettings']
@@ -1210,6 +1221,10 @@ class EpubProcessor:
                         var.set(sec.getboolean(name) if isinstance(var, tk.BooleanVar) else sec[name])
             if 'ExcludeTocEntries' in config:
                 self.excluded_toc_entries = [tuple(v.split('|', 1)) for _, v in config.items('ExcludeTocEntries') if '|' in v]
+            if 'SearchBox' in config:
+                unesc = lambda s: [x.replace('\\|', '|') for x in re.split(r'(?<!\\)\|', s) if x] if s else []
+                self.text_search_terms = unesc(config['SearchBox'].get('text_terms', ''))
+                self.style_filter_terms = unesc(config['SearchBox'].get('style_terms', ''))
             if hasattr(self, 'regex_manager'): self.regex_manager.set_log_level(self.log_level_var.get())
             logger.info(f"加载配置:[{self.log_level_var.get()}] {self.config_file}")
         except Exception as e: logger.error(f"加载配置失败: {e}")
