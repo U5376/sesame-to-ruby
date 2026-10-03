@@ -460,4 +460,40 @@ class RegexManager:
                 except Exception as e:
                     messagebox.showerror("删除失败", str(e))
         menu.add_command(label="删除配置", command=delete_config)
-        tree.bind("<Button-3>", lambda event: (tree.selection_set(tree.identify_row(event.y)), menu.post(event.x_root, event.y_root)) if tree.identify_row(event.y) else None)
+        def save_as_new():
+            old_path = self.config_file
+            base = Path(old_path).parent
+            stem, suffix = Path(old_path).stem, Path(old_path).suffix
+            for i in range(1, 100):
+                new_name = f"{stem}{i}{suffix}"
+                new_path = base / new_name
+                if not new_path.exists(): break
+            try:
+                self.config_file = Path(new_path)
+                if self.parent: self.parent.config_file = Path(new_path)
+                if self.parent and hasattr(self.parent, 'save_app_settings'):
+                    self.parent.save_app_settings()
+                else:
+                    shutil.copy2(old_path, new_path)
+                if not new_path.exists(): raise RuntimeError("新配置文件未生成")
+                self._init_ini_files()
+                self.ini_menu['values'] = self.ini_names
+                self.ini_menu.set(new_name); self.selected_ini.set(new_name)
+                tree.delete(*tree.get_children())
+                [tree.insert("", "end", iid=i, values=(n, p)) for i, (n, p) in enumerate(zip(self.ini_names, self.ini_files))]
+                for iid in tree.get_children():
+                    if tree.item(iid, "values")[0] == new_name:
+                        tree.selection_set(iid); tree.see(iid); break
+            except Exception as e:
+                messagebox.showerror("保存失败", str(e))
+                self.config_file = Path(old_path)
+                if self.parent: self.parent.config_file = Path(old_path)
+        empty_menu = tk.Menu(tree, tearoff=0)
+        empty_menu.add_command(label="另存为新配置", command=save_as_new)
+        def on_right_click(event):
+            row = tree.identify_row(event.y)
+            if row:
+                tree.selection_set(row); menu.post(event.x_root, event.y_root)
+            else:
+                empty_menu.post(event.x_root, event.y_root)
+        tree.bind("<Button-3>", on_right_click)
