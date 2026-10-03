@@ -103,11 +103,22 @@ class ClassList:
         
         # 文件树右键菜单 选中项删除确认及内存标记
         ftree_menu = tk.Menu(ftree, tearoff=0)
-        ftree_menu.add_command(label="删除文件", command=lambda: (sel := ftree.selection()) and 
-                                    messagebox.askyesno("确认", f"确认删除选中的 {len(sel)} 个项目?", parent=cw) and 
-                                    ([paths := [ftree.item(i, "tags")[0] for i in sel]], 
+        ftree_menu.add_command(label="删除文件", command=lambda: (sel := ftree.selection()) and
+                                    messagebox.askyesno("确认", f"确认删除选中的 {len(sel)} 个项目?", parent=cw) and
+                                    ([paths := [ftree.item(i, "tags")[0] for i in sel]],
                                     _sync_opf([p for p in paths if not p.endswith('/')]), # 局部函数 同步OPF引用删除
                                     [(self.modified_files.__setitem__(p, None), ftree.delete(i)) for i, p in zip(sel, paths)]))
+        ftree_menu.add_separator()
+        # 右键复制: 多选时逐条换行拼接 目录条目以/结尾取Path().name为空 则原样复制
+        def _copy_paths(transform, tip):
+            paths = [ftree.item(i, "tags")[0] for i in ftree.selection()]
+            out = [transform(p) or p for p in paths]
+            if out:
+                self.root.clipboard_clear(); self.root.clipboard_append('\r\n'.join(out))
+                logger.info(f"{tip}: 复制了 {len(out)} 项")
+        ftree_menu.add_command(label="复制文件名", command=lambda: _copy_paths(lambda p: os.path.splitext(os.path.basename(p))[0], "文件名(不含后缀)"))
+        ftree_menu.add_command(label="复制含后缀文件名", command=lambda: _copy_paths(lambda p: os.path.basename(p), "文件名"))
+        ftree_menu.add_command(label="复制完整路径", command=lambda: _copy_paths(lambda p: p, "完整路径"))
         ftree.bind("<Button-3>", lambda e: (iid := ftree.identify_row(e.y)) and (ftree.selection_add(iid), ftree_menu.post(e.x_root, e.y_root)))
 
         if DND_FILES:
