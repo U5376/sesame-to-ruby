@@ -1,4 +1,5 @@
 import atexit
+import configparser
 import os
 import re
 import shutil
@@ -15,18 +16,18 @@ from loguru import logger
 from tkinterdnd2 import DND_FILES
 
 class ClassList:
-    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, workers_cfg='Auto', win_size=None, text_search_terms=None, style_filter_terms=None, save_cfg=None, text_search_history=None, style_filter_history=None):
+    def __init__(self, root, epub_path, get_temp, set_temp, append_temp, workers_cfg='Auto', win_size=None, text_search_terms=None, style_filter_terms=None, config_file=None, text_search_history=None, style_filter_history=None):
         self.root, self.epub_path = root, epub_path
         self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
         self.workers_cfg = workers_cfg
         self.win_size = win_size
-        # 下拉词条为内存记忆 持久化仅在自定义搜索对话框手动保存时触发(复用主程序save_app_settings)
+        # 下拉词条为内存记忆 持久化仅在搜索词条对话框手动保存时触发(本类save_search_box_only局部写)
         self.text_search_terms = text_search_terms if text_search_terms is not None else []
         self.style_filter_terms = style_filter_terms if style_filter_terms is not None else []
         # 历史(纯内存 不持久化) 由主程序持有 跨ClassList实例共享 关窗/换配置不丢失
         self.text_search_history = text_search_history if text_search_history is not None else []
         self.style_filter_history = style_filter_history if style_filter_history is not None else []
-        self.save_cfg = save_cfg
+        self.config_file = config_file
         self._search_boxes, self._style_boxes = [], []  # 存活的搜索/筛选下拉框引用 用于词条变更后刷新
         self.style_data, self.samples_data, self.counts_data, self.img_counts = {}, {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
@@ -94,6 +95,28 @@ class ClassList:
                 except tk.TclError:
                     boxes.remove(w)
 
+    def save_search_box_only(self):
+        """搜索词条对话框专用: 仅更新[SearchBox]段与search_cfg_editor窗口尺寸 其余配置原样保留"""
+        if not self.config_file: return
+        try:
+            raw = self.config_file.read_text('utf-8')
+            pre, sep, rules = raw.partition('[RegexRules]')  # 正则段由regex_manager管理 原样切出
+            cfg = configparser.ConfigParser(interpolation=None)
+            cfg.read_string(pre)
+            esc = lambda items: '|'.join(t.replace('|', '\\|') for t in items)
+            if geom := self.win_size._states.get('search_cfg_editor'):
+                if 'WinSize' not in cfg: cfg.add_section('WinSize')
+                cfg['WinSize']['search_cfg_editor'] = geom
+            cfg['SearchBox'] = {'text_terms': esc(self.text_search_terms), 'style_terms': esc(self.style_filter_terms)}
+            import io
+            with io.StringIO() as buf:
+                cfg.write(buf)
+                out = buf.getvalue().strip()
+            if sep: out += '\n\n[RegexRules]' + rules
+            self.config_file.write_text(out + '\n', encoding='utf-8')
+            logger.info(f"搜索词条已保存(局部): {self.config_file}")
+        except Exception as e: logger.error(f"保存搜索词条失败: {e}")
+
     def edit_search_cfg(self):
         """自定义搜索: 手动编辑正文搜索与样式筛选的下拉词条(保存写入当前配置)"""
         parent = getattr(self, '_cw', self.root)
@@ -112,10 +135,7 @@ class ClassList:
             self.text_search_terms[:] = read_terms(text_search_box)
             self.style_filter_terms[:] = read_terms(style_filter_box)
             self._refresh_search_boxes()
-            # 沿用主程序保存功能(唯一写config.ini路径) 与其它设置一起原子写入
-            if self.save_cfg:
-                try: self.save_cfg()
-                except Exception as e: logger.error(f"保存搜索词条失败: {e}")
+            self.save_search_box_only()  # 局部保存: 仅[SearchBox]段与search_cfg_editor 不影响其他
             d.destroy()
         ttk.Button(row, text="保存", width=5, command=save_entries).pack(side="right")
         ttk.Button(row, text="关闭", width=5, command=d.destroy).pack(side="right", padx=(0, 5))

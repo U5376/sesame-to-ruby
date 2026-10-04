@@ -1183,7 +1183,7 @@ class EpubProcessor:
                   self._settings_vars_dict['max_workers_var'].get(),
                   self.win_size,
                   self.text_search_terms, self.style_filter_terms,
-                  self.save_app_settings,
+                  self.config_file,
                   self.text_search_history, self.style_filter_history)
 
     def save_app_settings(self, return_config=False):
