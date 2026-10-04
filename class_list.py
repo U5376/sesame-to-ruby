@@ -554,7 +554,7 @@ class ClassList:
                     key = (state.get("last_q"), state["current_file"])
                     spans = state.get("by_file", {}).get(state["current_file"], ())
                     # 同文件同查询且已有匹配:已刷/正在刷,不重复
-                    if spans and state.get("painted") == key: return
+                    if spans and state.get("painted") == key and txt.tag_ranges("m"): return
                     if not spans:
                         # 无匹配仅清黄标不记录painted: 若提前记录, 后续扫描出的匹配会被去重守卫拦截致黄标画不上
                         txt.tag_remove("m", "1.0", "end")
@@ -597,42 +597,53 @@ class ClassList:
                             try: win.after_cancel(hid)
                             except Exception: pass
                         state.update({"last_q": q, "results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
-                        
                     try:
                         with zipfile.ZipFile(self.epub_path, "r") as z:
                             nl = z.namelist()
+                            # 文件顺序改为跟随左侧文件树显示序(spine列表)
                             if not state["file_pos"]:
-                                all_valid = sorted({f for f in nl + list(self.modified_files.keys()) if f.endswith((".html", ".xhtml"))})
-                                state["file_pos"] = {f: i for i, f in enumerate(all_valid)}
-
-                            # 非全局时扫描域限定当前文件: 异文件条目会走file_pos跳到别的文件(span超长被clamp到末尾), 故排除
-                            if global_search_var.get():
-                                cand = list(nl) + list(self.modified_files.keys())
-                            else:
-                                cand = [state["current_file"]] + [p for p in self.modified_files if p == state["current_file"]]
-                            s_files = sorted({f for f in cand
-                                            if f.endswith((".html", ".xhtml")) and (f in nl or self.modified_files.get(f) is not None)})
-                            
-                            # 非全局: 结果域过滤到当前文件双保险拦截残留(modified泄漏/状态遗留), 过滤后补扫无重复计算
+                                _order = []
+                                def _walk(item):
+                                    for c in ftree.get_children(item):
+                                        p = ftree.item(c, "tags")[0]
+                                        if not p.endswith('/'):
+                                            _order.append(p)
+                                        _walk(c)  # 目录节点递归下钻
+                                _walk("")
+                                seen = set(_order)
+                                # 兜底: 运行期新增、建树后未出现的html文件 按名称排序追加到末尾
+                                _order += sorted(f for f in set(nl) | set(self.modified_files.keys())
+                                                    if f.endswith((".html", ".xhtml")) and f not in seen)
+                                state["file_pos"] = {f: i for i, f in enumerate(_order) if f.endswith((".html", ".xhtml"))}
+                            # 非全局: 每次针对当前文件整体重建结果域(原"结果域过滤"紧跟清空=对空列表过滤空操作; ←→切文件时旧文件匹配残留进results 致跨文件乱跳/页尾滚屏)
                             if not global_search_var.get():
-                                state["results"] = [r for r in state["results"] if r[0] == state["current_file"]]
-                            
-                            new_matches = False
-                            for f in s_files:
-                                if f not in state["scanned_files"]:
-                                    spans = [m.span() for m in re.finditer(q, get_cached_content(f, z))]
-                                    state["scanned_files"].add(f)
-                                    if spans:
-                                        state["by_file"][f] = spans
-                                        state["results"].extend((f, s) for s in spans)
-                                        new_matches = True
-                            
-                            if new_matches:
-                                state["results"].sort(key=lambda x: (state["file_pos"].get(x[0], 9999), x[1]))
+                                cf = state["current_file"]
+                                if cf and cf.endswith((".html", ".xhtml")) and (cf in nl or self.modified_files.get(cf) is not None):
+                                    spans = [m.span() for m in re.finditer(q, get_cached_content(cf, z))]
+                                    state["by_file"][cf] = spans
+                                    state["results"] = [(cf, s) for s in spans]
+                                    state["scanned_files"].add(cf)
+                                else:
+                                    state["results"] = []
+                            else:
+                                # 全局: 仅增量扫描未扫描过的文件
+                                cand = list(nl) + list(self.modified_files.keys())
+                                s_files = sorted({f for f in cand if f.endswith((".html", ".xhtml")) and (f in nl or self.modified_files.get(f) is not None)})
+                                new_matches = False
+                                for f in s_files:
+                                    if f not in state["scanned_files"]:
+                                        spans = [m.span() for m in re.finditer(q, get_cached_content(f, z))]
+                                        state["scanned_files"].add(f)
+                                        if spans:
+                                            state["by_file"][f] = spans
+                                            state["results"].extend((f, s) for s in spans)
+                                            new_matches = True
+                                if new_matches:
+                                    state["results"].sort(key=lambda x: (state["file_pos"].get(x[0], 9999), x[1]))
                             # 全局扫描挤出LRU缓存(上限15)致content取空、高亮落1.0, 扫描后回读当前文件
                             if state["current_file"] and state["current_file"] not in state["html_cache"]:
                                 get_cached_content(state["current_file"], z)
-                    except Exception as e: 
+                    except Exception as e:
                         logger.error(f"正则搜索失败: {e}")
                         # 中间态正则(如[^未闭合)报错直接返回, 清除过期高亮并重置绘制状态
                         txt.tag_remove("m", "1.0", "end"); txt.tag_remove("cur", "1.0", "end")
@@ -645,44 +656,55 @@ class ClassList:
                     # 仅新查询时挂起记录(导航不重置计时 1秒后照常记录)
                     if is_new:
                         state['hist_id'] = win.after(1000, lambda q=q: self._record_history(q, self.text_search_history))
-
-                    # 重扫后同步记忆位置: 同文件取起点最近邻(span删改后漂移精确相等常失配); 比较取span[0]起点; 无匹配则置-1回落定位模式
-                    if keep is not None:
+                    # 重扫后同步记忆位置: 同文件取起点最近邻(span删改后漂移精确相等常失配); 比较取span[0]起点; 无匹配则置-1回落定位模式; 仅锚定到当前文件(否则min()会选中跨文件任意远处匹配致计数乱跳)
+                    if keep is not None and keep[0] == state["current_file"]:
                         cands = [(i, r[1][0]) for i, r in enumerate(res) if r[0] == keep[0]]
                         state["search_index"] = min(cands, key=lambda t: abs(t[1] - keep[1][0]))[0] if cands else -1
-
+                    elif keep is not None:  # 记忆命中在其它文件不锚定,交给下方定位模式取当前文件第一条
+                        state["search_index"] = -1
+                    # 无匹配出口: 显式清掉cur橙标与m黄标(原只靠paint_m_async清m, cur从不清理致残留)
                     if not res:
+                        txt.tag_remove("cur", "1.0", "end"); txt.tag_remove("m", "1.0", "end")
                         paint_m_async(content)
                         return sl.config(text="0/0")
                         
                     # ↑↓导航:只移动索引(O(1)),不再tag_remove全文重刷、不再重新finditer
                     if navigate:
                         if state["search_index"] < 0:
-                            cur_pos = state["file_pos"].get(state["current_file"], -1)
-                            if cur_pos < 0:  # 当前文件不在扫描范围(如非html文件):直接取首/尾
-                                state["search_index"] = len(res) - 1 if rev else 0
-                            elif rev:  # ↑: 从后往前找第一条位于当前文件之前的结果,没有则回绕到最后一条
-                                state["search_index"] = next((i for i in range(len(res) - 1, -1, -1)
-                                                              if state["file_pos"].get(res[i][0], -1) < cur_pos), len(res) - 1)
-                            else:      # ↓: 从前往后找第一条位于当前文件之后的结果,没有则回绕到第一条
-                                state["search_index"] = next((i for i, (f, _) in enumerate(res)
-                                                              if state["file_pos"].get(f, -1) > cur_pos), 0)
+                            # 当前文件自身有匹配时优先落在本文件(↓取首条 ↑取末条): 原file_pos严格比较会跳过当前文件
+                            same = [i for i, (f, _) in enumerate(res) if f == state["current_file"]]
+                            if same:
+                                state["search_index"] = same[-1] if rev else same[0]
+                            else:
+                                cur_pos = state["file_pos"].get(state["current_file"], -1)
+                                if cur_pos < 0:  # 当前文件不在扫描范围(如非html文件):直接取首/尾
+                                    state["search_index"] = len(res) - 1 if rev else 0
+                                elif rev:  # ↑: 从后往前找第一条位于当前文件之前的结果,没有则回绕到最后一条
+                                    state["search_index"] = next((i for i in range(len(res) - 1, -1, -1)
+                                                                  if state["file_pos"].get(res[i][0], -1) < cur_pos), len(res) - 1)
+                                else:      # ↓: 从前往后找第一条位于当前文件之后的结果,没有则回绕到第一条
+                                    state["search_index"] = next((i for i, (f, _) in enumerate(res)
+                                                                  if state["file_pos"].get(f, -1) > cur_pos), 0)
                         else:
                             state["search_index"] = (state["search_index"] + (-1 if rev else 1)) % len(res)
                     elif not (0 <= state["search_index"] < len(res)) or res[state["search_index"]][0] != state["current_file"]:
                         # 定位模式:索引无效(未初始化/已越界)或未落在当前文件时,找当前文件的第一条结果(找不到就不跳)
                         state["search_index"] = next((i for i, (f, _) in enumerate(res) if f == state["current_file"]), -1)
-                        
-                    if state["search_index"] < 0:  # 当前文件无匹配:显示总数但不强行跳走
+                    if state["search_index"] < 0:  # 当前文件无匹配:显示总数但不强行跳走,同时清掉过期高亮
+                        txt.tag_remove("cur", "1.0", "end"); txt.tag_remove("m", "1.0", "end")
                         paint_m_async(content)
                         return sl.config(text=f"-/{len(res)}")
                         
                     target_path, (gs, ge) = res[state["search_index"]]
-                    if target_path != state["current_file"]: 
+                    # 非全局禁止跨文件跳转(结果域已限定当前文件,此分支双保险拦截残留跨文件条目)
+                    if not global_search_var.get() and target_path != state["current_file"]:
+                        txt.tag_remove("cur", "1.0", "end"); txt.tag_remove("m", "1.0", "end")
+                        paint_m_async(content)
+                        return sl.config(text=f"-/{len(res)}")
+                    if target_path != state["current_file"]:
                         load_content_to_text(target_path)  # 跨文件跳转(仅↑↓全局导航时触发)
-                        # 文件改变后必须重新拉取最新上下文才能保证坐标正确
-                        content = state["html_cache"].get(state["current_file"], "")
-                        
+                    # 文件改变后必须重新拉取最新上下文才能保证坐标正确
+                    content = state["html_cache"].get(state["current_file"], "")
                     # 高亮并跳转到当前特定匹配项: 同样使用极速的 line.col 定位
                     txt.tag_remove("cur", "1.0", "end")
                     txt.tag_add("cur", (s_idx := to_tk_idx(gs, content)), to_tk_idx(ge, content))
