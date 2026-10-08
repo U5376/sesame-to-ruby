@@ -1,9 +1,10 @@
-﻿import tkinter as tk
+import tkinter as tk
 
 class ToolTip:
-    def __init__(self, widget, text="", follow_widget=None, wrap_length=300):
+    def __init__(self, widget, text="", follow_widget=None, wrap_length=300, fallback=""):
         self.widget = widget
         self._text = text
+        self.fallback = fallback  # text为空时悬停显示的兜底文本(不参与编辑/持久化)
         self.wrap_length = wrap_length  # 新增换行长度参数
         self.follow_widget = follow_widget
         self.tip_window = None
@@ -21,7 +22,7 @@ class ToolTip:
 
     def show_tip(self, event=None):
         """显示多行提示"""
-        if self.tip_window or not self._text:
+        if self.tip_window or not (self._text or self.fallback):
             return
 
         # 计算提示窗口位置
@@ -36,7 +37,7 @@ class ToolTip:
         # 创建支持多行显示的Label
         label = tk.Label(
             self.tip_window,
-            text=self._text,
+            text=self._text or self.fallback,
             bg="#FFFFE0",
             relief="solid",
             borderwidth=1,
