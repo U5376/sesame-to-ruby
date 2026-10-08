@@ -97,6 +97,49 @@ def mp_modify_html(soup, class_names):
                     ruby.append(rt_tag)
                 span.replace_with(ruby)
 
+def mp_rewrite_tags(soup, dom_rules):
+    """DOM标签结构改写(unwrap拆包/rename改名/decompose删除)"""
+    if not dom_rules:  # 未配置DOM条目零开销直返
+        return
+    # 预处理规则: (compiled, (action, tag, keep_attrs), 是否匹配完整开标签) 避免循环内重复判定
+    rules = [(rx, act, p.startswith('<')) for rx, act, p in dom_rules]
+    has_full = any(f for _, _, f in rules)  # '<'开头=匹配完整开标签串
+    has_cls = any(not f for _, _, f in rules)  # 否则仅匹配class属性
+    skip_names = frozenset(('html', 'head', 'body'))  # 文档骨架保护
+    counts = {}
+    for tag in soup.find_all(True):  # 单次全量快照: 后续decompose/unwrap不影响本轮迭代
+        if tag.name in skip_names or tag.parent is None:
+            continue  # 骨架标签 / 已随祖先decompose销毁(守卫O(1)跳过 不做无效正则搜索)
+        # 匹配串懒构建: 仅存在对应规则组才构建 且每标签每介质只构建一次供全部规则复用
+        hay_full = hay_cls = None
+        if has_full:
+            parts = []
+            for k, v in tag.attrs.items():  # 重建完整开标签串: list属性展开空格串 空list退化布尔属性写法
+                if isinstance(v, list):
+                    v = ' '.join(v) if v else None
+                parts.append(f'{k}="{v}"' if v else k)
+            hay_full = f"<{tag.name}{' ' + ' '.join(parts) if parts else ''}>"
+        if has_cls:
+            hay_cls = ' '.join(tag.get('class', []))
+        for rx, act, is_full in rules:
+            hay = hay_full if is_full else hay_cls
+            if hay is None or not rx.search(hay):
+                continue
+            action, new_name, keep_attrs, inject = act
+            if action == 'decompose':  # 连内容整块删除 其子树由快照parent守卫自然跳过
+                tag.decompose()
+            elif action == 'rename':  # O(1)改名 配对闭包由bs4同步 默认丢属性 @保留 [属性段]注入同名覆盖
+                tag.name = new_name
+                if not keep_attrs:
+                    tag.attrs.clear()
+                if inject:
+                    tag.attrs.update(inject)
+            else:  # unwrap: 删开标签+自动删配对闭包 内容原位上提
+                tag.unwrap()
+            counts[action] = counts.get(action, 0) + 1
+            break  # 命中即断: 单标签单轮仅首个命中动作生效(动作后对象已消费/匹配串已过期)
+    #if counts: logger.debug(f"DOM标签结构改写: {counts}")
+
 def mp_post_process_images(soup):
     """
     图片标签多看交互规格化
@@ -138,6 +181,7 @@ def mp_post_process_images(soup):
 def mp_process_blank_lines(soup, remove_blank, limit_blank, remove_head_blank=False):
     """全局空行清理与连续空行限制、首部空行清理"""
     def is_blank_tag(tag):
+        # 判定空行的条件:1.<br>标签 2.<p>无文本且仅含<br>或空白 3.<div>无文本且子节点仅为br跟空白p标签
         if tag.name == 'br': return True
         if tag.name == 'p':
             children = [c for c in tag.children if isinstance(c, (str, type(tag)))]
@@ -225,15 +269,16 @@ def mp_process_single_file_pipeline(args):
     完全独立于主进程的 GUI 和 TKinter。纯数据驱动。
     可调整执行顺序
     """
-    (xf_str, rel_css, lang_val, class_name, flags, regex_rules) = args
+    (xf_str, rel_css, lang_val, class_name, flags, regex_rules, dom_rules) = args
     
     try:
         with open(xf_str, 'r', encoding='utf-8') as f:
             content = f.read()
 
         # ==============================================================
-        # 1: 首次 BS4 解析 (修正头部、执行 Ruby 与傍点转换)
+        # 1: 首次 BS4 解析 (DOM标签结构改写、修正头部、执行 Ruby 与傍点转换)
         soup = BeautifulSoup(content, 'html.parser')
+        if dom_rules: mp_rewrite_tags(soup, dom_rules) # 单标签匹配DOM条目进行改写(一般用于清理复杂的代码标签)
         if flags.get('is_style'): mp_normalize_xhtml_header(soup, lang_val, rel_css)
         if flags.get('is_process_ruby'): mp_process_ruby(soup)
         if flags.get('is_modify_html'): mp_modify_html(soup, class_name)
@@ -273,6 +318,14 @@ def mp_process_single_file_pipeline(args):
 class EpubProcessor:
     def __init__(self, root):
         self.root = root
+        bg_target = '#F9F9F9'
+        # 只对特定的类生效，避免污染根窗口或其他
+        self.root.configure(bg=bg_target) # 1. 改变主窗口自身背景
+        self.root.option_add('*Frame.background', bg_target)
+        self.root.option_add('*Label.background', bg_target)
+        self.root.option_add('*Checkbutton.background', bg_target)
+        self.root.option_add('*Radiobutton.background', bg_target)
+        self.root.option_add('*Button.background', "#F8F8F8") # 按钮分出个色差
         self.regex_entries = []
         self.excluded_toc_entries = []
         self._exclude_tempdirs = set()
@@ -291,11 +344,11 @@ class EpubProcessor:
 
         # 按钮配置：(文本, 命令, grid(row, col), tooltip)
         btn_cfgs = [
-            ('读取epub', self.open_file_dialog, (0, 0), "加载单个epub文件\n支持拖拽epub进UI窗口"),
+            ('读取Epub ', self.open_file_dialog, (0, 0), "加载单个epub文件\n支持拖拽epub进UI窗口"),
             ('开始转换', self.start_conversion, (0, 1), "转换加载的单个epub文件"),
             ('批量转换', self.batch_convert_epubs, (0, 2), "批量转换\n支持epub拖拽到按钮\n原名文件保存至output文件夹"),
             ('class列表', self.show_class_list, (1, 0), "epub内所使用的class列表\nspan列表\n图片class列表"),
-            ('排除合并', self.show_exclude_dialog, (1, 1), "优先显示nav后显示ncx.注意偏移只对ncx生效\n章节合并功能排除选定的目录条目\n批量也能排除指定的章节名\n右键管理排除列表"),
+            ('排除合并', self.show_exclude_dialog, (1, 1), "优先显示nav后ncx.偏移仅对ncx生效\n章节合并功能批量排除选定的条目进行合并\n右键管理排除列表\n*正则追加条目执行在图片转换后(图片格式变化会影响条目匹配)"),
             ('重置设置', self.reset_app_settings, (1, 2), "重置所有设置为默认状态\n右键重置内存winsize值"),
         ]
         for text, cmd, (row, col), tip in btn_cfgs:
@@ -320,14 +373,16 @@ class EpubProcessor:
             ('process_images_enabled', '图片标签多看交互规格化', '将奇怪的图片标签全部规格化成多看格式\n排除span跟gaiji', []),
             ('merge_xhtml_enabled', 'Xhtml章节间合并', '根据目录合并章节间文件\n优先使用nav,没有则使用ncx', [
                 ('merge_separator_var', '3br', ttk.Combobox, {'w': 5, 'val': ['-','hr+br']+[f'{i}br' for i in range(1, 9)]}, '章节合并时插入的分隔符样式'),
-                ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, '删除指定的空行数量'),
-                ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, '限制连续空行的行数')]),
+                ('merge_remove_blank_lines_var', '-', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (13,0)}, 
+                 '删除指定的空行数量\n\n指代码上的空行(阅读器一般只渲染br标签)\n简单例子:\n<br/>\n<p><br/></p>\n<p class="calibre"></p>\n<p> </p>\n<div><br/></div>\n<div><p></p></div>\n<div><p><br/></p></div>'),
+                ('merge_limit_blank_lines_var', '3', ttk.Combobox, {'w': 2, 'val': ['-']+[str(i) for i in range(1, 10)], 'px': (3,0)}, 
+                 '限制连续空行数\n\n空行判定(满足其一):\n1.<br/>或<br>\n2.<p>无文本且仅含<br>或空白\n3.<div>无文本且子节点仅为br跟空白p标签')]),
             ('delete_style_enabled', '删除自带Style并添加自定义样式表', '清理原有样式跟opf竖排属性\n添加css文件及更新引用\n规格化头部信息', []),
             ('generate_ncx_enabled', '生成ncx', '没有则自动生成ncx\n确保OPF内引用和spine正确', [
                 ('ncx_path_fix_enabled', 'src修正', tk.Checkbutton, {'px': (0, 0)}, '对照opf列表自动修正ncx内src路径'),
                 ('ncx_offset_enabled', '偏移', tk.Checkbutton, {'px': (0, 0)}, '最后一条目录文件不存在时进行-1顺序修正\n自动偏移开关,不影响强制偏移\n只用于ncx nav没写'),
                 ('ncx_manual_offset_val', '0', tk.Entry, {'w': 3, 'px': (0, 0)}, '强制目录偏移+ -，0不执行操作\n优先于自动偏移\n只用于ncx nav没写'),
-                ('ncx_atokagi_enabled', '补全后记', tk.Checkbutton, {'px': (2, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html')]),
+                ('ncx_atokagi_enabled', '补全条目', tk.Checkbutton, {'px': (2, 0)}, '自动补全ncx/nav缺失的あとがき条目\n前20行含あとがき关键词全书唯一html\n附带补全封面功能,懒得写多个选项')]),
             ('convert_epub_version_enabled', '转Epub2.0并删除nav.xhtml', '将EPUB版本转换为2.0\n移除nav.xhtml\n生成cover声明', []),
             ('convert_images_var', '转换图片', '图片转换设置', [
                 ('image_params_var', '-f webp -q80 -H1300 -s1 -w8 -A', tk.Entry, {'w': 10, 'sticky': 'ew'}, 
@@ -335,8 +390,9 @@ class EpubProcessor:
                   '-s 锐化 默认1.0不处理\n-A 保留透明通道Alpha\n-w 线程数\n-m WebP压缩等级 1-6'))]),
             ('auto_override_enabled', '旋转图片', '用于 飾り罫線 自动旋转\n超过阈值追加覆盖成新的转换参数\n需要触发阈值、没被排除、-R参数命中才会旋转', [
                 ('override_count_var', '10', tk.Entry, {'w': 3}, '触发追加参数的最低出现次数阈值'),
-                ('override_skip_var', 'gaiji', tk.Entry, {'w': 8, 'px': (4,0)}, '正则排除图片(匹配class或src)\n例:gaiji|cover\\.jpg |隔开多个输入'),
-                ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (4,0), 'sticky': 'ew'}, 
+                ('override_skip_var', 'gaiji', tk.Entry, {'w': 13, 'px': (2,0), 'sticky': 'ew'}, 
+                 '正则匹配class或src,可用|隔开多条规则\n默认排除:命中的图片跳过处理(例:gaiji|cover)\n强制包含:+无视阈值强制追加(例:+gaiji|+cover.jpg)\n排他模式:!+仅追加命中的图片,其余全忽略(例:!+001.*?.jpg'),
+                ('override_param_var', '-r -90 -R 1:2', tk.Entry, {'w': 25, 'px': (2,0), 'sticky': 'ew'}, 
                  '追加覆盖的参数\n-r-90 [旋转方向(+90,-90,180,270)默认0不旋转]\n-R1:2 [触发旋转的比例(1.5, 128x1366, 1:2)，为空则不限制]')]),
             ('set_lang_enabled', '语言标识', 'opf跟head的头部语言标识参数', [
                 ('set_lang_var', 'ja', tk.Entry, {'w': 10}, 'ja\nzh-CN'),
@@ -379,6 +435,9 @@ class EpubProcessor:
         base_dir = Path(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.argv[0]))))
         self.config_file = base_dir / "config.ini"
         self.win_size = WinSize(self.config_file)
+        # 搜索框下拉词条: 内存记忆为主 不自动保存 仅手动保存(自定义搜索对话框或主程序保存按钮)时写入config
+        self.text_search_terms, self.style_filter_terms = [], []
+        self.text_search_history, self.style_filter_history = [], []
         self.log_level_var = self._settings_vars_dict.setdefault('log_level', tk.StringVar(value="info"))
         self.load_app_settings()
         recorder = self.win_size.setup(root, "main", "350x620+600+160")
@@ -474,12 +533,13 @@ class EpubProcessor:
 
             # ================= Phase 2: 单页内容级操作 (多进程逻辑) ================= #
 
-            # 1. 抽取正则规则 (纯数据列表，规避 GUI 组件 pickling 问题)
-            regex_rules = []
+            # 1. 抽取正则/DOM规则 (纯数据列表，规避 GUI 组件 pickling 问题)
+            regex_rules, dom_rules = [], []
             try:
                 regex_rules = self.regex_manager.get_rules()
+                dom_rules = self.regex_manager.get_dom_rules()
             except Exception as e:
-                logger.warning(f"提取内存正则规则失败: {e}")
+                logger.warning(f"提取内存正则/DOM规则失败: {e}")
 
             # 2. 抽取布尔开关和变量为纯字典
             flags_dict = {
@@ -503,7 +563,7 @@ class EpubProcessor:
             for xf_str in html_files:
                 rel_css = os.path.relpath(css_dir / 'style.css', Path(xf_str).parent).replace('\\', '/')
                 mp_args.append((
-                    xf_str, rel_css, lang_val, class_name, flags_dict, regex_rules
+                    xf_str, rel_css, lang_val, class_name, flags_dict, regex_rules, dom_rules
                 ))
 
             logger.info(f"启动多进程流水线处理 {len(html_files)} 个文件")
@@ -520,6 +580,7 @@ class EpubProcessor:
             # 汇报日志输出 使用flags_dict和regex_rules 避免重复调用get
             f = flags_dict.get
             [logger.info(msg) for cond, msg in [
+                (dom_rules, "DOM标签结构改写 √"),
                 (f('is_style'), "xhtml头部信息规格化与css重建 √"),
                 (f('is_process_ruby'), "Ruby标签规格化 √"),
                 (f('is_modify_html'), "傍点转换ruby格式 √"),
@@ -590,11 +651,12 @@ class EpubProcessor:
         spine = opf_soup.spine or (_ for _ in ()).throw(ValueError("OPF 文件缺少 spine 定义"))
         opf_dir = opf_path.parent
 
-        # 构建 spine 列表
+        # 构建 spine 列表 (按opf属性定位排除nav)
+        nav_paths = {p for p in EpubNCXGenerator.find_nav_path(opf_path).values() if p}
         spine_files = [(opf_dir/itm.get('href')).resolve() for ref in spine.find_all('itemref')
                     if (idr:=ref.get('idref')) and (itm:=opf_soup.find('item',id=idr))
                     and itm.get('media-type') in ['application/xhtml+xml', 'text/html']
-                    and (href:=itm.get('href')) and not href.lower().endswith('nav.xhtml')]
+                    and (href:=itm.get('href')) and (opf_dir/href).resolve() not in nav_paths]
         logger.debug(f"Spine文件列表: {spine_files}")
 
         toc = self._parse_toc(opf_soup,opf_path) # parse_toc决定优先使用nav
@@ -714,26 +776,65 @@ class EpubProcessor:
                 try:
                     threshold, img_counts = int(self.override_count_var.get()), {}
                     excluded_paths = set()
-                    skip_rule = getattr(self, 'override_skip_var', tk.StringVar(value='gaiji')).get().strip()
-                    skip_re = re.compile(skip_rule) if skip_rule else None
-                    # 只处理 .xhtml/.html 文件，且排除 nav.xhtml 正则排除图片(匹配class或src)
-                    for html_file in [f for f in temp_dir_path.rglob('*') if f.suffix.lower() in ('.xhtml', '.html') and f.name.lower() != 'nav.xhtml']:
+                    included_paths = set()
+                    # 解析包含与排除规则
+                    rule_input = getattr(self, 'override_skip_var', tk.StringVar(value='gaiji')).get().strip()
+                    skip_rules, include_rules = [], []
+                    is_exclusive = False # 是否开启排他模式
+                    if rule_input:
+                        for part in rule_input.split('|'):
+                            part = part.strip()
+                            if not part: continue
+                            if part.startswith('!+'):
+                                include_rules.append(part[2:]) # 截取!+之后的内容
+                                is_exclusive = True
+                            elif part.startswith('+'):
+                                include_rules.append(part[1:]) # 截取+之后的内容
+                            else:
+                                skip_rules.append(part) # 默认作为排除规则
+                    skip_re = re.compile('|'.join(skip_rules)) if skip_rules else None
+                    include_re = re.compile('|'.join(include_rules)) if include_rules else None
+                    # 只处理 .xhtml/.html 文件,按opf属性定位排除nav, 正则排除图片(匹配class或src)
+                    nav_paths = {p for p in EpubNCXGenerator.find_nav_path(self._get_opf_path(temp_dir_path)).values() if p}
+                    for html_file in [f for f in temp_dir_path.rglob('*') if f.suffix.lower() in ('.xhtml', '.html') and f.resolve() not in nav_paths]:
                         soup = BeautifulSoup(html_file.read_text('utf-8', 'ignore'), 'html.parser')
-                        for img in soup.find_all('img'):
-                            if (src := img.get('src')) and (abs_src := (html_file.parent / unquote(src)).resolve()).exists():
+                        # 兼容查找常规 img 标签与 svg 内的 image 标签
+                        for img in soup.find_all(['img', 'image']):
+                            # 兼容各种 src 属性写法
+                            src = img.get('src') or img.get('xlink:href') or img.get('{http://www.w3.org/1999/xlink}href') or img.get('href')
+                            if src and (abs_src := (html_file.parent / unquote(src)).resolve()).exists():
                                 p_str = str(abs_src)
                                 img_counts[p_str] = img_counts.get(p_str, 0) + 1
+                                img_class_str = ' '.join(img.get('class', []))
                                 # 命中排除正则记录到 excluded_paths
-                                if skip_re and (skip_re.search(' '.join(img.get('class', []))) or skip_re.search(src)):
+                                if skip_re and (skip_re.search(img_class_str) or skip_re.search(src)):
                                     excluded_paths.add(p_str)
-                    for p, c in {k: v for k, v in img_counts.items() if v >= threshold}.items():
+                                # 命中包含正则记录到 included_paths
+                                if include_re and (include_re.search(img_class_str) or include_re.search(src)):
+                                    included_paths.add(p_str)
+                    # 兜底检测：直接用文件名匹配正则，防止被包含在SVG内漏扫或仅存在于OPF的图片被忽略
+                    for p_str in original_images:
+                        if p_str not in img_counts:
+                            img_counts[p_str] = 0 # 保证兜底图片也能进入后续的判断逻辑
+                        file_name = Path(p_str).name
+                        if skip_re and skip_re.search(file_name):
+                            excluded_paths.add(p_str)
+                        if include_re and include_re.search(file_name):
+                            included_paths.add(p_str)
+                    for p, c in img_counts.items():
                         img_name = Path(p).name
-                        if p not in excluded_paths and override_str:
+                        if p in included_paths and override_str:
                             high_freq_images.add(p)
-                            logger.info(f"[追加参数候选] {img_name} 出现{c}次 将追加独立参数")
-                        else:
-                            reason = "命中排除规则" if p in excluded_paths else "未配置追加参数"
-                            logger.info(f"[追加参数候选] {img_name} 出现{c}次 【{reason}】")
+                            logger.info(f"[追加参数候选] {img_name} 强制命中规则 将追加独立参数")
+                        elif is_exclusive:
+                            logger.debug(f"[追加参数候选] {img_name} 出现{c}次 【未命中强制规则(排他模式)】")
+                        elif c >= threshold:
+                            if p not in excluded_paths and override_str:
+                                high_freq_images.add(p)
+                                logger.info(f"[追加参数候选] {img_name} 出现{c}次 将追加独立参数")
+                            else:
+                                reason = "命中排除规则" if p in excluded_paths else "未配置追加参数"
+                                logger.info(f"[追加参数候选] {img_name} 出现{c}次 【{reason}】")
                 except Exception as e: logger.error(f"统计图片时出错: {e}")
             # ===== 4. 生成文件名映射 =====
             # 判断是否应用了覆盖参数，从而赋予正确的后缀
@@ -860,7 +961,7 @@ class EpubProcessor:
 
         # 2. UI 构建
         dialog = tk.Toplevel(self.root); dialog.title("选择不合并条目 / 正则追加分割章节")
-        self.win_size.setup(dialog, "show_exclude_dialog", f"605x600+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"); dialog.focus_force()
+        dialog.bind('<Configure>', self.win_size.setup(dialog, "show_exclude_dialog", f"605x600+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"), add='+'); dialog.focus_force()
         main_frame = ttk.Frame(dialog); main_frame.pack(fill="both", expand=True, padx=5, pady=5)
         tree = ttk.Treeview(main_frame, columns=("t", "h"), show="headings", selectmode="extended")
         sb = ttk.Scrollbar(main_frame, command=tree.yview); tree.configure(yscrollcommand=sb.set); sb.pack(side="right", fill="y")
@@ -953,17 +1054,40 @@ class EpubProcessor:
         if not hasattr(self, "_fcache"): self._fcache = {}
         opf, new_toc, dep, s_rules = self._get_opf_path(Path(temp_dir)), [], 0, split_rules or []
         lookup = {t['href'].split('#')[0].split('/')[-1]: t for t in current_toc}
+        # nav/ncx为目录文档而非正文 排除避免正则命中landmarks等结构切坏nav(如里程碑标题)
+        meta_files = {p for p in EpubNCXGenerator.find_nav_path(opf).values() if p}
+        seen = set()  # (title, href)去重: 首行复用原文件时正则条目可能与既有条目(如あとがき自动补全)完全相同
         for hf in self._get_spine_ordered_files(opf):
-            if (n := hf.name) in lookup: new_toc.append(e := lookup.pop(n)); dep = e.get('depth', 0)
+            if hf.resolve() in meta_files: continue
+            if (n := hf.name) in lookup: new_toc.append(e := lookup.pop(n)); dep = e.get('depth', 0); seen.add((e.get('title', ''), e['href']))
             if not hf.exists(): continue
             if n not in self._fcache: self._fcache[n] = hf.read_text('utf-8', 'ignore')
-            if rules.search(c := self._fcache[n]):
-                for i, m in enumerate(rules.finditer(c), 1):
-                    # 匹配层级(1=同级, 2=子级)，计算相对深度
-                    matched = m.group()
-                    lvl = next((r[2] for r in s_rules if re.search(f"(?:{r[0]})", matched)), 2)
-                    new_toc.append({'title': self._clean_title(matched) or f"Sec {i}", 
-                                    'href': f"{hf.stem}_spt_{i:03d}.xhtml", 'depth': dep + lvl - 1})
+            c = self._fcache[n]
+            if not (ms := list(rules.finditer(c))): continue
+            # 安全回退机制:找最近的\n或块级标签，且绝对不超越body的起点
+            body_m = re.search(r'<body[^>]*>', c, re.I)
+            body_end = body_m.end() if body_m else 0
+            starts = []
+            for m in ms:
+                nl, blks = c.rfind('\n', 0, m.start()) + 1, list(re.finditer(r'<(?:p|div|h[1-6]|li|section|article)\b', c[:m.start()], re.I))
+                starts.append(max(nl, blks[-1].start() if blks else 0, body_end))
+            # 首行判定:剥离标签/实体/空白后无文本，且无图片标签，则视为首部
+            pre = c[body_end:starts[0]]
+            is_empty_prefix = not re.sub(r'&#?\w+;|\s+', '', re.sub(r'<[^>]+>', '', pre)) and not re.search(r'<(img|image|svg)\b', pre, re.I)
+            cur_h = hf.relative_to(opf.parent).as_posix()
+            for i, m in enumerate(ms):
+                # 匹配层级(1=同级, 2=子级)，计算相对深度
+                matched = m.group()
+                lvl = next((r[2] for r in s_rules if re.search(f"(?:{r[0]})", matched)), 2)
+                # 支持正则多捕获组提取拼合成标题(区分有无捕获组)
+                t_clean = self._clean_title(" ".join(g for g in m.groups() if g and g.strip())) if m.groups() else self._clean_title(matched)
+                # 判定：如果是首行重复则复用原文件路径，否则生成spt序列文件
+                use_orig = (i == 0 and is_empty_prefix)
+                spt_idx = i if is_empty_prefix else i + 1
+                href = cur_h if use_orig else f"{hf.stem}_spt_{spt_idx:03d}.xhtml"
+                if (t_f := (t_clean or f"空条目 父级第{i+1}次分割", href)) not in seen:  # 跳过与既有条目完全相同的正则条目
+                    seen.add(t_f)
+                    new_toc.append({'title': t_f[0], 'href': href, 'depth': dep + lvl - 1})
         for remain_node in lookup.values(): new_toc.append(remain_node) # 保留失效条目
         return new_toc
 
@@ -971,7 +1095,10 @@ class EpubProcessor:
         """正则匹配子章节追加分割逻辑"""
         if not (rules := getattr(self, '_split_rules', [])): return current_toc
         opf_p, total = self._get_opf_path(Path(temp_dir)), 0
-        last_href = current_toc[0]['href'] if current_toc else None
+        # nav/ncx为目录文档而非正文 排除避免正则命中landmarks等结构切坏nav(如里程碑标题)
+        meta_files = {p for p in EpubNCXGenerator.find_nav_path(opf_p).values() if p}
+        # 锚点按spine顺序向前寻找(命中lookup才更新), 找不到保持None走目录头部插入
+        last_href = None
         regex = re.compile("|".join(f"(?:{r[0]})" for r in rules if r))
         lookup = {Path(t['href'].split('#')[0]).name: t for t in (current_toc or [])}
         TPL = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n\n'
@@ -979,35 +1106,51 @@ class EpubProcessor:
                '<head>\n<title>{t}</title>\n<link href="../css/style.css" rel="stylesheet" type="text/css"/>\n</head>\n'
                '<body>\n{c}\n</body>\n</html>')
         for hf in self._get_spine_ordered_files(opf_p):
+            if hf.resolve() in meta_files: continue
             if (n := hf.name) in lookup:
-                last_href = lookup[n]['href']; logger.debug(f"父级起始锚点: {n} -> {last_href}")
+                last_href = lookup[n]['href']; logger.opt(colors=True).debug(f"<e>父级起始锚点:</> {n} -> {last_href}")
             raw = hf.read_text('utf-8', 'ignore')
-            if not (ms := list(regex.finditer(raw))) or not last_href: continue
+            # 锚点为None不再跳过,允许目录为空,进行分割并以头部插入创建第一条条目
+            if not (ms := list(regex.finditer(raw))): continue
             # 提取元数据：如果原文件有则用原文件的，没有则默认 ja
             title = (re.search(r'<title>(.*?)</title>', raw, re.I) or [0, "Chapter"])[1]
             lang = (re.search(r'xml:lang="(.*?)"', raw, re.I) or [0, "ja"])[1]
-            logger.debug(f"正在分割文件: {n} | 当前锚点: {last_href}")
-            # 首行判定：剥离标签/实体/空白后无文本，且无图片标签，则视为首部与第一章重合
+            logger.opt(colors=True).debug(f"<w>正在分割文件: {n} | 当前锚点: {last_href or '<y>(无锚点→目录头部)</y>'}</>")
+            # 安全回退机制:找最近的\n或块级标签，且绝对不超越body的起点
             body_m = re.search(r'<body[^>]*>', raw, re.I)
-            pre = raw[body_m.end():ms[0].start()] if body_m else raw[:ms[0].start()]
+            body_end = body_m.end() if body_m else 0
+            starts = []
+            for m in ms:
+                nl, blks = raw.rfind('\n', 0, m.start()) + 1, list(re.finditer(r'<(?:p|div|h[1-6]|li|section|article)\b', raw[:m.start()], re.I))
+                starts.append(max(nl, blks[-1].start() if blks else 0, body_end))
+            # 首行判定:剥离标签/实体/空白后无文本，且无图片标签，则视为首部与章节重合 会跳过br跟空标签(判定跳过不代表会删除这些标签)
+            pre = raw[body_end:starts[0]]
             is_empty_prefix = not re.sub(r'&#?\w+;|\s+', '', re.sub(r'<[^>]+>', '', pre)) and not re.search(r'<(img|image|svg)\b', pre, re.I)
-            ivs, cur_h, subs = [m.start() for m in ms] + [len(raw)], hf.relative_to(opf_p.parent).as_posix(), []
+            ivs, cur_h, subs = starts + [len(raw)], hf.relative_to(opf_p.parent).as_posix(), []
             # 若首部为空 沿用原文件.否则仅保留匹配条目前的内容，匹配条目后的内容正常切割出新文件
             hf.write_text(raw[:ivs[1 if is_empty_prefix else 0]].split("</body>")[0] + "\n</body>\n</html>", 'utf-8')
             # 依规则原序提取子章节信息 (1=同级/父, 2=子级)
             for i, m in enumerate(ms):
                 # 直接从 rules 匹配层级 (r[0]=pattern, r[2]=level)，匹配不到则默认为 2
                 depth = next((r[2] for r in rules if re.search(f"(?:{r[0]})", m.group())), 2)
-                t_clean = self._clean_title(m.group())
+                # 支持正则多捕获组提取拼合成标题(区分有无捕获组)
+                t_clean = self._clean_title(" ".join(g for g in m.groups() if g and g.strip())) if m.groups() else self._clean_title(m.group())
+                t_clean = t_clean or f"空条目 父级第{i+1}次分割"
                 # 判定：如果是首行重复则复用原文件路径，否则生成spt序列文件
                 use_orig = (i == 0 and is_empty_prefix)
-                sid = f"{hf.stem}_s0" if use_orig else f"{hf.stem}_spt_{i+1:03d}"
+                spt_idx = i if is_empty_prefix else i + 1 # 动态调整spt序号
+                sid = f"{hf.stem}_s0" if use_orig else f"{hf.stem}_spt_{spt_idx:03d}"
                 shref = cur_h if use_orig else (hf.parent / f"{sid}.xhtml").relative_to(opf_p.parent).as_posix()
                 if not use_orig:
                     (hf.parent / f"{sid}.xhtml").write_text(TPL.format(l=lang, t=title, c=raw[ivs[i]:ivs[i+1]].split("</body>")[0].strip()), 'utf-8')
+                # 去重后日志输出存在有nav没条目，ncx有条目的情况
+                if use_orig and lookup.get(n, {}).get('title', '') == t_clean:
+                    logger.opt(colors=True).debug(f"<r>跳过重复条目(首行复用):</r> <w>标题={t_clean}, 文件={n}, 与既有目录条目完全一致</w>")
+                    continue
                 s = {'id': sid.replace('.', '_'), 'href': shref, 'title': t_clean, 'depth': depth}
                 subs.append(s)
                 logger.debug(f"匹配条目{'(首行复用)' if use_orig else ''}: 标题={s['title']}, 层级={s['depth']}, 文件={shref.split('/')[-1]}")
+            if not subs: continue  # 全部跳过时无需写回OPF/目录, 且规避下方subs[-1]取默认值越界
             # OPF 原位插入(Manifest 紧跟原文件，Spine 保持顺序)
             soup = BeautifulSoup(opf_p.read_text('utf-8'), 'xml')
             if (old_it := soup.find('item', href=cur_h)) and (old_rf := soup.find('itemref', idref=old_it['id'])):
@@ -1019,12 +1162,15 @@ class EpubProcessor:
                     if s['href'] != cur_h: old_rf.insert_after(soup.new_tag('itemref', idref=s['id']))
                 opf_p.write_text(str(soup), 'utf-8')
             try:
+                # last_href为None时insert_sub_chapters走无锚点头部插入
                 if (added := EpubNCXGenerator.insert_sub_chapters(opf_p, last_href, subs)):
                     total += added
                     # 锚点更新逻辑：反向查找最后一个同级(depth=1)节点，规避全量列表生成跟层级塌陷.depth=2次级节点不更新，保持原父级锚点
-                    if (l1_href := next((s['href'] for s in reversed(subs) if s.get('depth', 2) == 1), None)):
+                    # 兜底:无depth=1且无锚点(全2级已头部插为顶级)时取最后一条, 否则锚点恒为None每轮插头部顺序颠倒
+                    l1_href = next((s['href'] for s in reversed(subs) if s.get('depth', 2) == 1), subs[-1]['href'] if not last_href else None)
+                    if l1_href:
                         old_h, last_href = last_href, l1_href
-                        logger.debug(f"锚点更新(同级): {old_h} -> {last_href} (新增 {added} 章节)")
+                        logger.opt(colors=True).debug(f"<w>锚点更新(同级)</>: {old_h} -> {last_href} (新增 {added} 章节)")
             except Exception as e: logger.error(f"插入章节失败: {e}")
         if total > 0: logger.info(f"追加/分割章节完成: 共 {total} 条子章节")
         return current_toc
@@ -1046,7 +1192,7 @@ class EpubProcessor:
             self._exclude_initialized = True
 
         d = tk.Toplevel(self.root); d.title("已排除的合并章节列表")
-        self.win_size.setup(d, "show_exclude_list", f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"); d.focus_force()
+        d.bind('<Configure>', self.win_size.setup(d, "show_exclude_list", f"500x400+{self.root.winfo_x()+50}+{self.root.winfo_y()+30}"), add='+'); d.focus_force()
         f_tree = ttk.Frame(d); f_tree.pack(fill="both", expand=True, padx=5, pady=5)
         tree = ttk.Treeview(f_tree, columns=("t", "h"), show="headings", selectmode="extended")
         sb = ttk.Scrollbar(f_tree, orient="vertical", command=tree.yview); tree.configure(yscrollcommand=sb.set)
@@ -1081,7 +1227,10 @@ class EpubProcessor:
                   lambda v: setattr(self, 'temp_style_content', v), 
                   lambda v: setattr(self, 'temp_style_content', self.temp_style_content + v),
                   self._settings_vars_dict['max_workers_var'].get(),
-                  self.win_size)
+                  self.win_size,
+                  self.text_search_terms, self.style_filter_terms,
+                  self.config_file,
+                  self.text_search_history, self.style_filter_history)
 
     def save_app_settings(self, return_config=False):
         """保存到配置文件，或返回ConfigParser对象"""
@@ -1090,6 +1239,11 @@ class EpubProcessor:
         if self.win_size._states: self.win_size.save(config)
         if entries := getattr(self, 'excluded_toc_entries', []):
             config['ExcludeTocEntries'] = {str(i): f"{t}|{h}" for i, (t, h) in enumerate(entries)}
+        if getattr(self, 'text_search_terms', None) or getattr(self, 'style_filter_terms', None):
+            # 词条内含正则的|时用\|转义 分隔符仍为|
+            esc = lambda items: '|'.join(t.replace('|', '\\|') for t in items)
+            config['SearchBox'] = {'text_terms': esc(self.text_search_terms),
+                                   'style_terms': esc(self.style_filter_terms)}
         if return_config: return config
         try:
             import io
@@ -1104,7 +1258,7 @@ class EpubProcessor:
         """用 configparser 读取配置（跳过正则段）"""
         if not self.config_file.exists(): return logger.warning(f"配置文件不存在: {self.config_file}")
         try:
-            config = configparser.ConfigParser()
+            config = configparser.ConfigParser(interpolation=None)  # 关闭插值 防止词条含%时读取报错
             config.read_string(self.config_file.read_text('utf-8').split('[RegexRules]', 1)[0])
             if 'AppSettings' in config:
                 sec = config['AppSettings']
@@ -1113,6 +1267,10 @@ class EpubProcessor:
                         var.set(sec.getboolean(name) if isinstance(var, tk.BooleanVar) else sec[name])
             if 'ExcludeTocEntries' in config:
                 self.excluded_toc_entries = [tuple(v.split('|', 1)) for _, v in config.items('ExcludeTocEntries') if '|' in v]
+            if 'SearchBox' in config:
+                unesc = lambda s: [x.replace('\\|', '|') for x in re.split(r'(?<!\\)\|', s) if x] if s else []
+                self.text_search_terms = unesc(config['SearchBox'].get('text_terms', ''))
+                self.style_filter_terms = unesc(config['SearchBox'].get('style_terms', ''))
             if hasattr(self, 'regex_manager'): self.regex_manager.set_log_level(self.log_level_var.get())
             logger.info(f"加载配置:[{self.log_level_var.get()}] {self.config_file}")
         except Exception as e: logger.error(f"加载配置失败: {e}")
