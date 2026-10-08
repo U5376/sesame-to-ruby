@@ -97,6 +97,49 @@ def mp_modify_html(soup, class_names):
                     ruby.append(rt_tag)
                 span.replace_with(ruby)
 
+def mp_rewrite_tags(soup, dom_rules):
+    """DOM标签结构改写(unwrap拆包/rename改名/decompose删除)"""
+    if not dom_rules:  # 未配置DOM条目零开销直返
+        return
+    # 预处理规则: (compiled, (action, tag, keep_attrs), 是否匹配完整开标签) 避免循环内重复判定
+    rules = [(rx, act, p.startswith('<')) for rx, act, p in dom_rules]
+    has_full = any(f for _, _, f in rules)  # '<'开头=匹配完整开标签串
+    has_cls = any(not f for _, _, f in rules)  # 否则仅匹配class属性
+    skip_names = frozenset(('html', 'head', 'body'))  # 文档骨架保护
+    counts = {}
+    for tag in soup.find_all(True):  # 单次全量快照: 后续decompose/unwrap不影响本轮迭代
+        if tag.name in skip_names or tag.parent is None:
+            continue  # 骨架标签 / 已随祖先decompose销毁(守卫O(1)跳过 不做无效正则搜索)
+        # 匹配串懒构建: 仅存在对应规则组才构建 且每标签每介质只构建一次供全部规则复用
+        hay_full = hay_cls = None
+        if has_full:
+            parts = []
+            for k, v in tag.attrs.items():  # 重建完整开标签串: list属性展开空格串 空list退化布尔属性写法
+                if isinstance(v, list):
+                    v = ' '.join(v) if v else None
+                parts.append(f'{k}="{v}"' if v else k)
+            hay_full = f"<{tag.name}{' ' + ' '.join(parts) if parts else ''}>"
+        if has_cls:
+            hay_cls = ' '.join(tag.get('class', []))
+        for rx, act, is_full in rules:
+            hay = hay_full if is_full else hay_cls
+            if hay is None or not rx.search(hay):
+                continue
+            action, new_name, keep_attrs, inject = act
+            if action == 'decompose':  # 连内容整块删除 其子树由快照parent守卫自然跳过
+                tag.decompose()
+            elif action == 'rename':  # O(1)改名 配对闭包由bs4同步 默认丢属性 @保留 [属性段]注入同名覆盖
+                tag.name = new_name
+                if not keep_attrs:
+                    tag.attrs.clear()
+                if inject:
+                    tag.attrs.update(inject)
+            else:  # unwrap: 删开标签+自动删配对闭包 内容原位上提
+                tag.unwrap()
+            counts[action] = counts.get(action, 0) + 1
+            break  # 命中即断: 单标签单轮仅首个命中动作生效(动作后对象已消费/匹配串已过期)
+    #if counts: logger.debug(f"DOM标签结构改写: {counts}")
+
 def mp_post_process_images(soup):
     """
     图片标签多看交互规格化
@@ -226,15 +269,16 @@ def mp_process_single_file_pipeline(args):
     完全独立于主进程的 GUI 和 TKinter。纯数据驱动。
     可调整执行顺序
     """
-    (xf_str, rel_css, lang_val, class_name, flags, regex_rules) = args
+    (xf_str, rel_css, lang_val, class_name, flags, regex_rules, dom_rules) = args
     
     try:
         with open(xf_str, 'r', encoding='utf-8') as f:
             content = f.read()
 
         # ==============================================================
-        # 1: 首次 BS4 解析 (修正头部、执行 Ruby 与傍点转换)
+        # 1: 首次 BS4 解析 (DOM标签结构改写、修正头部、执行 Ruby 与傍点转换)
         soup = BeautifulSoup(content, 'html.parser')
+        if dom_rules: mp_rewrite_tags(soup, dom_rules) # 单标签匹配DOM条目进行改写(一般用于清理复杂的代码标签)
         if flags.get('is_style'): mp_normalize_xhtml_header(soup, lang_val, rel_css)
         if flags.get('is_process_ruby'): mp_process_ruby(soup)
         if flags.get('is_modify_html'): mp_modify_html(soup, class_name)
@@ -489,12 +533,13 @@ class EpubProcessor:
 
             # ================= Phase 2: 单页内容级操作 (多进程逻辑) ================= #
 
-            # 1. 抽取正则规则 (纯数据列表，规避 GUI 组件 pickling 问题)
-            regex_rules = []
+            # 1. 抽取正则/DOM规则 (纯数据列表，规避 GUI 组件 pickling 问题)
+            regex_rules, dom_rules = [], []
             try:
                 regex_rules = self.regex_manager.get_rules()
+                dom_rules = self.regex_manager.get_dom_rules()
             except Exception as e:
-                logger.warning(f"提取内存正则规则失败: {e}")
+                logger.warning(f"提取内存正则/DOM规则失败: {e}")
 
             # 2. 抽取布尔开关和变量为纯字典
             flags_dict = {
@@ -518,7 +563,7 @@ class EpubProcessor:
             for xf_str in html_files:
                 rel_css = os.path.relpath(css_dir / 'style.css', Path(xf_str).parent).replace('\\', '/')
                 mp_args.append((
-                    xf_str, rel_css, lang_val, class_name, flags_dict, regex_rules
+                    xf_str, rel_css, lang_val, class_name, flags_dict, regex_rules, dom_rules
                 ))
 
             logger.info(f"启动多进程流水线处理 {len(html_files)} 个文件")
@@ -535,6 +580,7 @@ class EpubProcessor:
             # 汇报日志输出 使用flags_dict和regex_rules 避免重复调用get
             f = flags_dict.get
             [logger.info(msg) for cond, msg in [
+                (dom_rules, "DOM标签结构改写 √"),
                 (f('is_style'), "xhtml头部信息规格化与css重建 √"),
                 (f('is_process_ruby'), "Ruby标签规格化 √"),
                 (f('is_modify_html'), "傍点转换ruby格式 √"),

@@ -59,8 +59,12 @@ class RegexManager:
         self.frame.pack(fill=tk.BOTH, padx=5, pady=5, expand=True)
         btn_frame = tk.Frame(self.frame)
         btn_frame.pack(fill=tk.X, pady=3)
+        add_btn = tk.Button(btn_frame, text="添加正则", command=lambda: self.add_entry(scroll=True), font=("宋体", 12))
+        add_btn.pack(side=tk.LEFT, padx=2)
+        add_btn.bind("<Button-3>", lambda e: self.add_entry(entry_type='dom', scroll=True))  # 右键: 直接添加DOM操作条目
+        ToolTip(add_btn, "左键:添加正则条目\n右键:添加DOM操作条目(目前只用于匹配单标签,清理闭合标签代码块)")
         [tk.Button(btn_frame, text=t, command=c, font=("宋体", 12)).pack(side=tk.LEFT, padx=2)
-         for t, c in [("添加正则", self.add_entry), ("保存设置", None)]]
+         for t, c in [("保存设置", None)]]
         # 配置文件下拉框，限制宽度为20
         ini_menu = ttk.Combobox(btn_frame, textvariable=self.selected_ini, values=[], state="readonly", font=("宋体", 12), width=11)
         ini_menu.pack(side=tk.LEFT, padx=2)
@@ -152,12 +156,13 @@ class RegexManager:
             current_rule and self._add_rule_from_dict(current_rule)
 
     def _add_rule_from_dict(self, rule_dict):
-        """从字典添加规则"""
+        """从字典添加规则 type=dom时以DOM模式加载(无type行默认regex)"""
         regex = rule_dict.get('regex', '')
         replace = rule_dict.get('replace', '')
         tooltip = rule_dict.get('tooltip', '')
         if regex or replace or tooltip:  # 有效性检查 三个为空则不加载
-            self.add_entry(regex, replace, tooltip)
+            self.add_entry(regex, replace, tooltip,
+                           entry_type='dom' if rule_dict.get('type', '').strip() == 'dom' else 'regex')
 
     def _create_default_rules(self):
         """创建默认规则"""
@@ -172,30 +177,56 @@ class RegexManager:
         for regex, replace, tip in defaults:
             self.add_entry(regex, replace, tip)
 
-    def add_entry(self, regex="", replace="", tooltip=None, index=None):
-        """添加正则条目 拖动手动排序"""
+    def add_entry(self, regex="", replace="", tooltip=None, index=None, entry_type='regex', scroll=False):
+        """添加正则/DOM条目 拖动手动排序 scroll=交互式添加时滚动视野"""
         entry_frame = tk.Frame(self.inner_frame)
-        # 正则框
-        regex_entry = tk.Entry(entry_frame, font=("宋体", 12), width=15)
-        regex_entry.insert(0, regex)
-        regex_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        # 拖动条（仅用于拖拽）
-        drag_bar = tk.Frame(entry_frame, width=3, highlightthickness=3, highlightbackground="#E6E6E6", cursor="fleur")
-        drag_bar.pack(side=tk.LEFT, fill=tk.Y, padx=0, pady=1)
-        # 替换框
-        replace_entry = tk.Entry(entry_frame, font=("宋体", 12), width=10)
-        replace_entry.insert(0, replace)
-        replace_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        # 只在拖动条上绑定拖拽事件
+        entry_frame.rule_type = entry_type  # 类型标记 持久化/规则提取/执行分组均依此识别
+        is_dom = (entry_type == 'dom')
+        default_tip = ""
+        if is_dom:
+            # DOM条目: 橙色拖动条打头 动作框拉满整行(实心bg 宽6px highlight方案会被裁剪不可见)
+            drag_bar = tk.Frame(entry_frame, width=6, bg="#FFB74D", cursor="fleur")
+            drag_bar.pack(side=tk.LEFT, fill=tk.Y, padx=(4, 0), pady=1)  # 左侧留间隔 防误触紧邻滚动条
+            regex_entry = tk.Entry(entry_frame, font=("宋体", 12))
+            regex_entry.insert(0, regex)  # 默认空条目
+            regex_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+            replace_entry, replace_tooltip = None, None  # DOM无替换框 5元组占位保持形状
+            # 默认语法说明仅悬停兜底显示(fallback) 不进text不写ini 编辑器带不出全文
+            entry_frame._tip_default = not (tooltip and tooltip.strip())
+            if entry_frame._tip_default:
+                default_tip = ('DOM操作 只匹配单标签进行操作\n'
+                               '<标签正则>           删标签留内容\n'
+                               '-<标签正则>          连内容整块删除\n'
+                               '=>h3                改名 丢属性\n'
+                               '=>h3@               改名 保留原属性\n'
+                               '=>h3[class=gaiji]   改名+丢属性+注入属性\n'
+                               '=>h3@[class=gaiji]  改名+保留+注入(同名覆盖)\n'
+                               '属性串:名=值 空格分隔多对 @紧跟标签名\n'
+                               '具体例:<div[^>]*font-120per[^>]*>=>h3@[class=gaiji bold style=font-size:1.2em]\n'
+                               '不以<开头的条目仅匹配class属性;正则内|需转义写\\|')
+                tooltip = ""
+        else:
+            # 原正则条目
+            regex_entry = tk.Entry(entry_frame, font=("宋体", 12), width=15)
+            regex_entry.insert(0, regex)
+            regex_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+            # 拖动条（仅用于拖拽）
+            drag_bar = tk.Frame(entry_frame, width=3, highlightthickness=3, highlightbackground="#E6E6E6", cursor="fleur")
+            drag_bar.pack(side=tk.LEFT, fill=tk.Y, padx=0, pady=1)
+            # 替换框
+            replace_entry = tk.Entry(entry_frame, font=("宋体", 12), width=10)
+            replace_entry.insert(0, replace)
+            replace_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+            replace_tooltip = ToolTip(replace_entry, tooltip or "", follow_widget=regex_entry)
+        # 只在拖动条上绑定拖拽事件(两种条目通用)
         drag_bar.bind("<ButtonPress-1>", self._drag_start)
         drag_bar.bind("<B1-Motion>", self._drag_motion)
         drag_bar.bind("<ButtonRelease-1>", self._drag_end)
         # 右键菜单绑定
-        for entry in (regex_entry, replace_entry):
+        for entry in ((regex_entry,) if is_dom else (regex_entry, replace_entry)):
             entry.bind("<Button-3>", lambda e, w=entry_frame: self._show_entry_context_menu(e, w))
-        # 创建共享的tooltip对象
-        shared_tooltip = ToolTip(regex_entry, tooltip or "")
-        replace_tooltip = ToolTip(replace_entry, tooltip or "", follow_widget=regex_entry)
+        # 创建共享的tooltip对象(默认语法说明作fallback 仅悬停显示)
+        shared_tooltip = ToolTip(regex_entry, tooltip or "", fallback=default_tip)
         # 删除按钮（不绑定拖动）
         del_btn = tk.Button(
             entry_frame, text="×", font=("宋体", 10),
@@ -216,6 +247,72 @@ class RegexManager:
         # 更新 canvas 的滚动区域，确保自动显示/隐藏滚动条
         self.inner_frame.update_idletasks()
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # 仅交互式添加(按钮/右键菜单)滚动视野 初始化/ini加载不滚动
+        if scroll:
+            self.canvas.update_idletasks()
+            if index is None:
+                self.canvas.yview_moveto(1.0)
+            else:
+                self.canvas.yview_moveto(entry_frame.winfo_y() / max(1, self.inner_frame.winfo_height()))
+
+    def get_dom_rules(self):
+        """获取编译后的DOM操作规则 主进程预编译一次 纯数据可pickle直传子进程"""
+        # <正则>=unwrap(配对闭包自动删,内容上提);-<正则>=decompose(连内容整块删);<正则>=>tag=rename(改标签名,@保留属性 [名=值]注入)
+        rules = []
+        for entry in self.regex_entries:
+            frame = entry[2]
+            if getattr(frame, 'rule_type', 'regex') != 'dom' or not frame.winfo_exists():
+                continue
+            text = entry[0].get()
+            if not text.strip():  # 空条目不加载(判空用strip)
+                continue
+            action, tag, keep_attrs, inject, pat = 'unwrap', None, False, None, text
+            if text.startswith('-'):
+                action, pat = 'decompose', text[1:]
+            elif '=>' in text:  # 改名后缀(正则内需匹配字面=>时写\=\>)
+                pat, _, suffix = text.partition('=>')
+                suffix = suffix.strip()  # 动作后缀去空白(后缀无需严格空白)
+                tag_part, bracket, tail = suffix.partition('[')
+                if tag_part.endswith('@'):  # @紧跟标签名=保留原属性
+                    keep_attrs, tag_part = True, tag_part[:-1]
+                if bracket:  # [名=值 ...]属性注入段 孤立token并入上一属性值(class多值空格连写) 引号值兼容
+                    if not tail.endswith(']'):
+                        logger.warning(f"DOM属性段缺]已跳过: {text}")
+                        continue
+                    inject, last_name, in_q = {}, None, False
+                    for tok in tail[:-1].split():
+                        if in_q:  # 引号续接: 拼接至闭引号token
+                            inject[last_name] += ' ' + tok[:-1] if tok.endswith('"') else ' ' + tok
+                            in_q = not tok.endswith('"')
+                            continue
+                        m = re.fullmatch(r'([\w:.-]+)=(.+)', tok)
+                        if m:  # 新属性
+                            last_name, val = m.group(1), m.group(2)
+                            if val.startswith('"') and not (val.endswith('"') and len(val) > 1):
+                                inject[last_name], in_q = val[1:], True  # 剥开引号 跨token续接
+                            elif val.startswith('"'):
+                                val = val[1:-1]
+                            if last_name not in inject:
+                                inject[last_name] = val
+                        elif last_name:  # 孤立token并入上一属性值(如class=gaiji bold)
+                            inject[last_name] += ' ' + tok
+                        else:
+                            in_q = True  # 无前置属性的孤立token 借用标志触发拒绝
+                            break
+                    if in_q or not inject:
+                        logger.warning(f"DOM属性段格式无效(名=值 孤立token并入上值)已跳过: {text}")
+                        continue
+                    inject = {k: (v.split() if k == 'class' else v) for k, v in inject.items()}  # class拆list(bs4多值属性)
+                if not tag_part or not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9:-]*', tag_part):
+                    logger.warning(f"DOM改名目标无效已跳过: {text}")
+                    continue
+                action, tag = 'rename', tag_part
+            pat = pat.strip()  # 去首尾空白(匹配目标无首尾空白 去空白无损 且避免误判class通道)
+            try:
+                rules.append((re.compile(pat), (action, tag, keep_attrs, inject), pat))
+            except re.error as e:
+                logger.warning(f"DOM规则无效已跳过: {text} | {e}")
+        return rules
 
     def _show_entry_context_menu(self, event, entry_frame):
         """正则条目右键菜单"""
@@ -224,6 +321,10 @@ class RegexManager:
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="上方插入正则", command=lambda: self.add_entry(index=idx))
         menu.add_command(label="下方插入正则", command=lambda: self.add_entry(index=idx + 1))
+        menu.add_separator()
+        menu.add_command(label="上方插入DOM操作", command=lambda: self.add_entry(index=idx, entry_type='dom'))
+        menu.add_command(label="下方插入DOM操作", command=lambda: self.add_entry(index=idx + 1, entry_type='dom'))
+        menu.add_separator()
         menu.add_command(label="编辑悬浮提示", command=lambda: self._edit_tooltip(entry_frame))
         menu.add_command(label="删除正则", command=lambda: self._delete_entry(entry_frame))
         menu.post(event.x_root, event.y_root)
@@ -245,17 +346,14 @@ class RegexManager:
         text.insert("1.0", regex_tooltip.text or "")
         top.focus_set()  # 焦到窗口到文本
         text.focus_set()
-        tk.Button(
-            top,
-            text="保存", 
-            font=font,
-            width=6,
-            command=lambda: [
-                setattr(regex_tooltip, 'text', text.get("1.0", "end-1c")),
-                setattr(replace_tooltip, 'text', text.get("1.0", "end-1c")),
-                top.destroy()
-            ]
-        ).pack(pady=(0, 3))
+        def _save_tip():
+            t = text.get("1.0", "end-1c")
+            setattr(regex_tooltip, 'text', t)
+            if replace_tooltip:  # DOM条目无replace_tooltip 守卫跳过
+                setattr(replace_tooltip, 'text', t)
+            setattr(widget, '_tip_default', False)  # 编辑过即视为自定义 随条目持久化
+            top.destroy()
+        tk.Button(top, text="保存", font=font, width=6, command=_save_tip).pack(pady=(0, 3))
 
     def apply_rules(self, content):
         """应用所有正则规则到指定内容"""
@@ -314,18 +412,23 @@ class RegexManager:
         self._create_default_rules()
 
     def get_rules_content(self):
-        """返回正则规则文本块（用于写入配置文件）"""
+        """返回正则规则文本块（用于写入配置文件） DOM条目额外写入type=dom行且无replace行"""
         content = "[RegexRules]\n"
         for i, entry in enumerate(self.regex_entries):
             regex_entry, replace_entry, frame, regex_tooltip, replace_tooltip = entry
             if not frame.winfo_exists():
                 continue
-            tooltip_text = regex_tooltip.text if regex_tooltip else ""
+            # 默认悬浮提示仅内存显示不写入配置 自定义后才持久化
+            tooltip_text = "" if getattr(frame, '_tip_default', False) else (regex_tooltip.text if regex_tooltip else "")
             formatted_tooltip = tooltip_text.replace("\n", "\n\t")
+            is_dom = getattr(frame, 'rule_type', 'regex') == 'dom'
+            type_line = "type=dom\n" if is_dom else ""  # 老配置无此行加载时默认regex
+            replace_line = "" if is_dom else f"replace={replace_entry.get()}\n"
             rule_block = (
                 f"rule_{i+1}\n"
+                f"{type_line}"
                 f"regex={regex_entry.get()}\n"
-                f"replace={replace_entry.get()}\n"
+                f"{replace_line}"
                 f"tooltip={formatted_tooltip}\n\n"
             )
             content += rule_block
@@ -340,11 +443,12 @@ class RegexManager:
         return ''
 
     def get_rules(self):
-        """获取编译后的规则"""
+        """获取编译后的规则(过滤DOM条目与空条目)"""
         return [
             (re.compile(entry[0].get()), entry[1].get())
             for entry in self.regex_entries
-            if entry[0].get().strip()
+            if entry[0].get().strip()  # 空条目不加载
+            and getattr(entry[2], 'rule_type', 'regex') != 'dom'  # DOM条目由get_dom_rules提取
         ]
 
     def update_ini_files(self):
