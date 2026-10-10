@@ -14,11 +14,12 @@ class AutoScrollbar(ttk.Scrollbar):
         super().__init__(parent, **kwargs)
         self.canvas, self._shown, self._width = canvas, False, width
     def set(self, lo, hi):
-        (lambda lo, hi: (
-            (self.place(in_=self.canvas, x=0, y=0, relheight=1, width=self._width), setattr(self, '_shown', True))
-            if float(lo) > 0.0 or float(hi) < 1.0 else
-            (self.place_forget(), setattr(self, '_shown', False)) if self._shown else None
-        ))(lo, hi)
+        show = float(lo) > 0.0 or float(hi) < 1.0
+        if show and not self._shown:
+            self.place(in_=self.canvas, x=0, y=0, relheight=1, width=self._width)
+        elif not show and self._shown:
+            self.place_forget()
+        self._shown = show
         super().set(lo, hi)
 
 class RegexManager:
@@ -69,6 +70,7 @@ class RegexManager:
         ini_menu = ttk.Combobox(btn_frame, textvariable=self.selected_ini, values=[], state="readonly", font=("宋体", 12), width=11)
         ini_menu.pack(side=tk.LEFT, padx=2)
         ini_menu.bind("<<ComboboxSelected>>", self._on_ini_selected)
+        ini_menu.bind("<MouseWheel>", lambda e: "break")  # 禁用滚轮滚动切换配置
         self.ini_menu = ini_menu
         self._init_ini_files()
 
@@ -78,6 +80,7 @@ class RegexManager:
                         width=5, state="readonly", font=("宋体", 12))
         cb.pack(side=tk.LEFT, padx=2)
         cb.bind("<<ComboboxSelected>>", lambda e: self.set_log_level(self.log_level_var.get(), show_log=True))
+        cb.bind("<MouseWheel>", lambda e: "break")  # 禁用滚轮滚动切换日志级别
         # ====== 可滚动条目区（canvas + inner_frame） ======
         self.scroll_container = tk.Frame(self.frame); self.scroll_container.pack(fill=tk.BOTH, expand=True)
         self.canvas = tk.Canvas(self.scroll_container, borderwidth=0, highlightthickness=0)
@@ -102,8 +105,7 @@ class RegexManager:
             ('<Enter>', lambda e: [self.canvas.bind_all(x, _on_mousewheel) for x in ('<MouseWheel>', '<Button-4>', '<Button-5>')]),
             ('<Leave>', lambda e: [self.canvas.unbind_all(x) for x in ('<MouseWheel>', '<Button-4>', '<Button-5>')])
         ]]
-        self.inner_frame.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._update_scroll_geometry()
         
         self._add_ini_menu_tooltip()
         self._add_ini_menu_manage()
@@ -115,13 +117,28 @@ class RegexManager:
         logger.add(sys.stderr, level=level.upper())
         if show_log: logger.log(level.upper(), "日志级别: {}", level)
 
+    def _update_scroll_geometry(self):
+        """重算滚动几何(update_idletasks+scrollregion) 批量加载/删除/重置等收尾统一调用"""
+        self.inner_frame.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _pack_at(self, frame, index):
+        """精准pack到指定索引 before=下一条目 替代全量pack重排(消除插入/拖拽闪烁)"""
+        kwargs = {'fill': tk.X, 'pady': 2}
+        if index + 1 < len(self.regex_entries):
+            kwargs['before'] = self.regex_entries[index + 1][2]
+        frame.pack(**kwargs)
+
     def load_config(self, config_path=None):
         if config_path:
             self.config_file = Path(config_path)
         # 清空UI（防止重复加载）
         [entry[2].destroy() for entry in getattr(self, 'regex_entries', []) if hasattr(entry[2], 'destroy')]
         self.regex_entries, self.tooltips = [], []
-        self._load_from_ini() if self.config_file.exists() else (self._create_default_rules())
+        self._load_from_ini(batch=True) if self.config_file.exists() else (self._create_default_rules(batch=True))
+        # 批量加载收尾: 统一重算滚动几何(替代每条update_idletasks/scrollregion)
+        self._update_scroll_geometry()
+        self.canvas.yview_moveto(0.0)  # 切换配置后回到顶部
         self._init_ini_files()
         # 保持下拉框选中项同步
         if hasattr(self, 'ini_names') and hasattr(self, 'ini_menu'):
@@ -131,21 +148,21 @@ class RegexManager:
             except Exception:
                 pass
 
-    def _load_from_ini(self):
-        """ini配置加载"""
+    def _load_from_ini(self, batch=False):
+        """ini配置加载 batch=True跳过每条add_entry的update_idletasks(性能优化)"""
         with open(self.config_file, 'r', encoding='utf-8') as f:
             current_rule, current_key, in_sec = {}, None, False
             for line in f:
                 line = line.rstrip('\n')
                 # 仅读取[RegexRules]段
                 if line.startswith('['):
-                    current_rule and self._add_rule_from_dict(current_rule)
+                    current_rule and self._add_rule_from_dict(current_rule, batch=batch)
                     current_rule, current_key, in_sec = {}, None, (line.strip() == "[RegexRules]")
                     continue
                 if not in_sec: continue
 
                 if line.startswith('rule_'):
-                    current_rule and self._add_rule_from_dict(current_rule)
+                    current_rule and self._add_rule_from_dict(current_rule, batch=batch)
                     current_rule, current_key = {}, None
                 # 读取tooltip多行续行:拼接换行并剥离首个缩进符(保留空格跟空行)
                 elif current_key == 'tooltip' and (line.startswith('\t') or line.startswith(' ')):
@@ -153,16 +170,17 @@ class RegexManager:
                 elif '=' in line:
                     key, value = line.split('=', 1)
                     current_rule[key.strip()], current_key = value, key.strip()
-            current_rule and self._add_rule_from_dict(current_rule)
+            current_rule and self._add_rule_from_dict(current_rule, batch=batch)
 
-    def _add_rule_from_dict(self, rule_dict):
-        """从字典添加规则 type=dom时以DOM模式加载(无type行默认regex)"""
+    def _add_rule_from_dict(self, rule_dict, batch=False):
+        """从字典添加规则 type=dom时以DOM模式加载(无type行默认regex) batch=透传给add_entry"""
         regex = rule_dict.get('regex', '')
         replace = rule_dict.get('replace', '')
         tooltip = rule_dict.get('tooltip', '')
         if regex or replace or tooltip:  # 有效性检查 三个为空则不加载
             self.add_entry(regex, replace, tooltip,
-                           entry_type='dom' if rule_dict.get('type', '').strip() == 'dom' else 'regex')
+                           entry_type='dom' if rule_dict.get('type', '').strip() == 'dom' else 'regex',
+                           batch=batch)
 
     def _create_default_rules(self):
         """创建默认规则"""
@@ -177,7 +195,7 @@ class RegexManager:
         for regex, replace, tip in defaults:
             self.add_entry(regex, replace, tip)
 
-    def add_entry(self, regex="", replace="", tooltip=None, index=None, entry_type='regex', scroll=False):
+    def add_entry(self, regex="", replace="", tooltip=None, index=None, entry_type='regex', scroll=False, batch=False):
         """添加正则/DOM条目 拖动手动排序 scroll=交互式添加时滚动视野"""
         entry_frame = tk.Frame(self.inner_frame)
         entry_frame.rule_type = entry_type  # 类型标记 持久化/规则提取/执行分组均依此识别
@@ -240,20 +258,12 @@ class RegexManager:
             self.regex_entries.append(item)
         else:
             self.regex_entries.insert(index, item)
-            for entry_item in self.regex_entries:
-                entry_item[2].pack_forget()
-            for entry_item in self.regex_entries:
-                entry_item[2].pack(fill=tk.X, pady=2)
-        # 更新 canvas 的滚动区域，确保自动显示/隐藏滚动条
-        self.inner_frame.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        # 仅交互式添加(按钮/右键菜单)滚动视野 初始化/ini加载不滚动
-        if scroll:
-            self.canvas.update_idletasks()
-            if index is None:
-                self.canvas.yview_moveto(1.0)
-            else:
-                self.canvas.yview_moveto(entry_frame.winfo_y() / max(1, self.inner_frame.winfo_height()))
+            self._pack_at(entry_frame, index)
+        if not batch:
+            self._update_scroll_geometry()
+            if scroll:  # 仅交互式添加滚动视野
+                self.canvas.update_idletasks()
+                self.canvas.yview_moveto(1.0 if index is None else entry_frame.winfo_y() / max(1, self.inner_frame.winfo_height()))
 
     def get_dom_rules(self):
         """获取编译后的DOM操作规则 主进程预编译一次 纯数据可pickle直传子进程"""
@@ -388,9 +398,9 @@ class RegexManager:
             item = self.regex_entries.pop(self.start_index)
             self.regex_entries.insert(target_index, item)
             self.start_index = target_index
-            # 重新排列界面
-            for entry in self.regex_entries:entry[2].pack_forget()
-            for entry in self.regex_entries:entry[2].pack(fill=tk.X, pady=2)
+            frame = item[2]
+            frame.pack_forget()
+            self._pack_at(frame, target_index)
 
     def _drag_end(self, event):
         if hasattr(self, 'start_index'):
@@ -403,6 +413,7 @@ class RegexManager:
             if isinstance(child, tk.Entry):
                 self.tooltips = [t for t in self.tooltips if t.widget != child]
         entry_frame.destroy()
+        self._update_scroll_geometry()
 
     def reset_to_default(self):
         """重置正则"""
@@ -410,6 +421,7 @@ class RegexManager:
             entry[2].destroy()
         self.regex_entries.clear()
         self._create_default_rules()
+        self._update_scroll_geometry()
 
     def get_rules_content(self):
         """返回正则规则文本块（用于写入配置文件） DOM条目额外写入type=dom行且无replace行"""
