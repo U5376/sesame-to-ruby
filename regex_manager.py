@@ -63,7 +63,7 @@ class RegexManager:
         add_btn = tk.Button(btn_frame, text="添加正则", command=lambda: self.add_entry(scroll=True), font=("宋体", 12))
         add_btn.pack(side=tk.LEFT, padx=2)
         add_btn.bind("<Button-3>", lambda e: self.add_entry(entry_type='dom', scroll=True))  # 右键: 直接添加DOM操作条目
-        ToolTip(add_btn, "左键:添加正则条目\n右键:添加DOM操作条目(目前只用于匹配单标签,清理闭合标签代码块)")
+        ToolTip(add_btn, "双击滑块可禁用条目\n左键:添加正则条目\n右键:添加DOM操作条目(在正则前执行,目前只用于匹配单标签,清理闭合标签代码块)")
         [tk.Button(btn_frame, text=t, command=c, font=("宋体", 12)).pack(side=tk.LEFT, padx=2)
          for t, c in [("保存设置", None)]]
         # 配置文件下拉框，限制宽度为20
@@ -180,7 +180,8 @@ class RegexManager:
         if regex or replace or tooltip:  # 有效性检查 三个为空则不加载
             self.add_entry(regex, replace, tooltip,
                            entry_type='dom' if rule_dict.get('type', '').strip() == 'dom' else 'regex',
-                           batch=batch)
+                           batch=batch,
+                           disabled=rule_dict.get('disabled', '').strip() == '1')
 
     def _create_default_rules(self):
         """创建默认规则"""
@@ -195,8 +196,10 @@ class RegexManager:
         for regex, replace, tip in defaults:
             self.add_entry(regex, replace, tip)
 
-    def add_entry(self, regex="", replace="", tooltip=None, index=None, entry_type='regex', scroll=False, batch=False):
-        """添加正则/DOM条目 拖动手动排序 scroll=交互式添加时滚动视野"""
+    def add_entry(self, regex="", replace="", tooltip=None, index=None, entry_type='regex', scroll=False, batch=False, disabled=False):
+        """添加正则/DOM条目 拖动手动排序 scroll=交互式添加时滚动视野
+        batch=批量加载模式: 跳过几何重算(收尾由load_config统一)
+        disabled=禁用条目(双击拖动条切换 不参与处理)"""
         entry_frame = tk.Frame(self.inner_frame)
         entry_frame.rule_type = entry_type  # 类型标记 持久化/规则提取/执行分组均依此识别
         is_dom = (entry_type == 'dom')
@@ -229,7 +232,7 @@ class RegexManager:
             regex_entry.insert(0, regex)
             regex_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
             # 拖动条（仅用于拖拽）
-            drag_bar = tk.Frame(entry_frame, width=3, highlightthickness=3, highlightbackground="#E6E6E6", cursor="fleur")
+            drag_bar = tk.Frame(entry_frame, width=3, bg="#E6E6E6", cursor="fleur")
             drag_bar.pack(side=tk.LEFT, fill=tk.Y, padx=0, pady=1)
             # 替换框
             replace_entry = tk.Entry(entry_frame, font=("宋体", 12), width=10)
@@ -240,6 +243,11 @@ class RegexManager:
         drag_bar.bind("<ButtonPress-1>", self._drag_start)
         drag_bar.bind("<B1-Motion>", self._drag_motion)
         drag_bar.bind("<ButtonRelease-1>", self._drag_end)
+        drag_bar.bind("<Double-Button-1>", lambda e, w=entry_frame: self._toggle_disabled(w))
+        entry_frame.drag_bar = drag_bar
+        entry_frame.bar_color = drag_bar.cget('bg')
+        entry_frame.disabled = disabled
+        if disabled: self._apply_disabled_style(entry_frame, True)
         # 右键菜单绑定
         for entry in ((regex_entry,) if is_dom else (regex_entry, replace_entry)):
             entry.bind("<Button-3>", lambda e, w=entry_frame: self._show_entry_context_menu(e, w))
@@ -253,17 +261,22 @@ class RegexManager:
         del_btn.pack(side=tk.RIGHT)
         # 保存条目信息（包含框架和共享的tooltip 支持末尾追加或指定位置插入）
         item = (regex_entry, replace_entry, entry_frame, shared_tooltip, replace_tooltip)
+        # DOM条目始终在正则之前: 约束插入位置到对应区域
+        dom_count = sum(1 for e in self.regex_entries if getattr(e[2], 'rule_type', 'regex') == 'dom')
         if index is None:
-            entry_frame.pack(fill=tk.X, pady=2)
-            self.regex_entries.append(item)
+            index = dom_count if is_dom else len(self.regex_entries)
+        elif is_dom:
+            index = min(index, dom_count)
         else:
-            self.regex_entries.insert(index, item)
-            self._pack_at(entry_frame, index)
+            index = max(index, dom_count)
+        self.regex_entries.insert(index, item)
+        self._pack_at(entry_frame, index)
         if not batch:
             self._update_scroll_geometry()
-            if scroll:  # 仅交互式添加滚动视野
+            if scroll:  # 滚到使新条目在视野底部可见(上方条目也可见)
                 self.canvas.update_idletasks()
-                self.canvas.yview_moveto(1.0 if index is None else entry_frame.winfo_y() / max(1, self.inner_frame.winfo_height()))
+                fraction = (entry_frame.winfo_y() + entry_frame.winfo_height() - self.canvas.winfo_height()) / max(1, self.inner_frame.winfo_height())
+                self.canvas.yview_moveto(max(0.0, min(1.0, fraction)))
 
     def get_dom_rules(self):
         """获取编译后的DOM操作规则 主进程预编译一次 纯数据可pickle直传子进程"""
@@ -271,7 +284,7 @@ class RegexManager:
         rules = []
         for entry in self.regex_entries:
             frame = entry[2]
-            if getattr(frame, 'rule_type', 'regex') != 'dom' or not frame.winfo_exists():
+            if getattr(frame, 'rule_type', 'regex') != 'dom' or not frame.winfo_exists() or getattr(frame, 'disabled', False):
                 continue
             text = entry[0].get()
             if not text.strip():  # 空条目不加载(判空用strip)
@@ -386,16 +399,23 @@ class RegexManager:
              if entry[2] == self.dragged_item),
             None
         )
+        self._drag_press_y = event.widget.winfo_pointery()
 
     def _drag_motion(self, event):
         if not hasattr(self, 'start_index') or self.start_index is None:return
-        # 获取当前鼠标位置对应的条目索引
         y = event.widget.winfo_pointery()
+        if abs(y - getattr(self, '_drag_press_y', y)) < 8: return  # 移动不足8px不触发 避免按住时误移
         target_index = next((i for i, entry in enumerate(self.regex_entries)
             if entry[2].winfo_rooty() + entry[2].winfo_height()/2 > y), len(self.regex_entries))
         # 调整位置
         if 0 <= target_index < len(self.regex_entries) and target_index != self.start_index:
             item = self.regex_entries.pop(self.start_index)
+            # DOM条目约束在DOM区 正则条目约束在正则区 确保DOM始终在前
+            dom_count = sum(1 for e in self.regex_entries if getattr(e[2], 'rule_type', 'regex') == 'dom')
+            if getattr(item[2], 'rule_type', 'regex') == 'dom':
+                target_index = min(target_index, dom_count)
+            else:
+                target_index = max(target_index, dom_count)
             self.regex_entries.insert(target_index, item)
             self.start_index = target_index
             frame = item[2]
@@ -405,6 +425,18 @@ class RegexManager:
     def _drag_end(self, event):
         if hasattr(self, 'start_index'):
             del self.start_index
+
+    def _toggle_disabled(self, frame):
+        """双击拖动条切换禁用/启用 禁用条目变灰且不参与处理流程"""
+        self._apply_disabled_style(frame, not getattr(frame, 'disabled', False))
+
+    def _apply_disabled_style(self, frame, disabled):
+        """统一应用禁用/启用视觉: Entry灰化不可编辑 + 拖动条变灰"""
+        frame.disabled = disabled
+        for child in frame.winfo_children():
+            if isinstance(child, tk.Entry):
+                child.configure(state='disabled' if disabled else 'normal')
+        frame.drag_bar.configure(bg='#B0B0B0' if disabled else frame.bar_color)
 
     def _delete_entry(self, entry_frame):
         """删除按钮功能"""
@@ -436,11 +468,13 @@ class RegexManager:
             is_dom = getattr(frame, 'rule_type', 'regex') == 'dom'
             type_line = "type=dom\n" if is_dom else ""  # 老配置无此行加载时默认regex
             replace_line = "" if is_dom else f"replace={replace_entry.get()}\n"
+            disabled_line = "disabled=1\n" if getattr(frame, 'disabled', False) else ""
             rule_block = (
                 f"rule_{i+1}\n"
                 f"{type_line}"
                 f"regex={regex_entry.get()}\n"
                 f"{replace_line}"
+                f"{disabled_line}"
                 f"tooltip={formatted_tooltip}\n\n"
             )
             content += rule_block
@@ -461,6 +495,7 @@ class RegexManager:
             for entry in self.regex_entries
             if entry[0].get().strip()  # 空条目不加载
             and getattr(entry[2], 'rule_type', 'regex') != 'dom'  # DOM条目由get_dom_rules提取
+            and not getattr(entry[2], 'disabled', False)  # 禁用条目跳过
         ]
 
     def update_ini_files(self):
