@@ -251,6 +251,7 @@ class RegexManager:
         # 右键菜单绑定
         for entry in ((regex_entry,) if is_dom else (regex_entry, replace_entry)):
             entry.bind("<Button-3>", lambda e, w=entry_frame: self._show_entry_context_menu(e, w))
+            entry.bind("<KeyRelease>", lambda e: e.widget.index(tk.INSERT) == len(e.widget.get()) and e.widget.xview_moveto(1.0)) # 确保光标在末尾时滚到最右
         # 创建共享的tooltip对象(默认语法说明作fallback 仅悬停显示)
         shared_tooltip = ToolTip(regex_entry, tooltip or "", fallback=default_tip)
         # 删除按钮（不绑定拖动）
