@@ -1240,10 +1240,8 @@ class EpubProcessor:
         if entries := getattr(self, 'excluded_toc_entries', []):
             config['ExcludeTocEntries'] = {str(i): f"{t}|{h}" for i, (t, h) in enumerate(entries)}
         if getattr(self, 'text_search_terms', None) or getattr(self, 'style_filter_terms', None):
-            # 词条内含正则的|时用\|转义 分隔符仍为|
-            esc = lambda items: '|'.join(t.replace('|', '\\|') for t in items)
-            config['SearchBox'] = {'text_terms': esc(self.text_search_terms),
-                                   'style_terms': esc(self.style_filter_terms)}
+            config['SearchBox'] = {'text_terms': ClassList.write_terms(self.text_search_terms),
+                                   'style_terms': ClassList.write_terms(self.style_filter_terms)}
         if return_config: return config
         try:
             import io
@@ -1268,9 +1266,8 @@ class EpubProcessor:
             if 'ExcludeTocEntries' in config:
                 self.excluded_toc_entries = [tuple(v.split('|', 1)) for _, v in config.items('ExcludeTocEntries') if '|' in v]
             if 'SearchBox' in config:
-                unesc = lambda s: [x.replace('\\|', '|') for x in re.split(r'(?<!\\)\|', s) if x] if s else []
-                self.text_search_terms = unesc(config['SearchBox'].get('text_terms', ''))
-                self.style_filter_terms = unesc(config['SearchBox'].get('style_terms', ''))
+                self.text_search_terms = ClassList.read_terms(config['SearchBox'].get('text_terms', ''))
+                self.style_filter_terms = ClassList.read_terms(config['SearchBox'].get('style_terms', ''))
             if hasattr(self, 'regex_manager'): self.regex_manager.set_log_level(self.log_level_var.get())
             logger.info(f"加载配置:[{self.log_level_var.get()}] {self.config_file}")
         except Exception as e: logger.error(f"加载配置失败: {e}")

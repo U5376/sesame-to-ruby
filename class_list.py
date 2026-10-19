@@ -1,5 +1,6 @@
 import atexit
 import configparser
+import json
 import os
 import re
 import shutil
@@ -8,26 +9,30 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from collections import namedtuple
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, colorchooser
 import lxml.html
 from bs4 import BeautifulSoup
 from loguru import logger
 from tkinterdnd2 import DND_FILES
 
 class ClassList:
+    ColorTerm = namedtuple('ColorTerm', 'color pattern raw name_only role exclude', defaults=(False, None, False))
+
     def __init__(self, root, epub_path, get_temp, set_temp, append_temp, workers_cfg='Auto', win_size=None, text_search_terms=None, style_filter_terms=None, config_file=None, text_search_history=None, style_filter_history=None):
         self.root, self.epub_path = root, epub_path
         self.get_temp_style_content, self.set_temp_style_content, self.append_temp_style_content = get_temp, set_temp, append_temp
         self.workers_cfg = workers_cfg
         self.win_size = win_size
-        # 下拉词条为内存记忆 持久化仅在搜索词条对话框手动保存时触发(本类save_search_box_only局部写)
+        # 下拉词条为内存记忆 落盘仅在对话框保存或首次注入默认词条时(经save_search_box_only局部写)
         self.text_search_terms = text_search_terms if text_search_terms is not None else []
         self.style_filter_terms = style_filter_terms if style_filter_terms is not None else []
         # 历史(纯内存 不持久化) 由主程序持有 跨ClassList实例共享 关窗/换配置不丢失
         self.text_search_history = text_search_history if text_search_history is not None else []
         self.style_filter_history = style_filter_history if style_filter_history is not None else []
         self.config_file = config_file
+        self.ensure_default_terms()  # 无[SearchBox]段时注入默认 opacity 词条并落盘
         self._search_boxes, self._style_boxes = [], []  # 存活的搜索/筛选下拉框引用 用于词条变更后刷新
         self.style_data, self.samples_data, self.counts_data, self.img_counts = {}, {}, {}, {}
         self.cats = {k: set() for k in ['Class列表', 'Span列表', '图片Class列表', '非P标签列表', '非P、img、body标签列表']}
@@ -53,9 +58,63 @@ class ClassList:
     # 下拉列表中分隔固定词条与临时(历史)词条的横线 选中时会被识别并跳过
     _SEP_LINE = "─" * 24
 
+    # 合法色号: #RGB / #RRGGBB 十六进制
+    _HEX_COLOR_RE = r'#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})'
+    # 默认 opacity 灰字颜色词条(无[SearchBox]段时注入) 复用既有 opacity 匹配正则
+    _DEFAULT_OPACITY_TERM = r'[#7E7A7A] (?i)<(p|span|div|h[1-6])\b[^>]*\bstyle=[\'"][^\'"]*opacity:\s*0?\.\d+[^>]*>[\s\S]*?</\1>'
+    @staticmethod
+    def _is_valid_color(color):
+        """色号合法性: #RGB/#RRGGBB 十六进制"""
+        return bool(re.fullmatch(ClassList._HEX_COLOR_RE, color))
+
+    @staticmethod
+    def _color_tag_name(color, role=None):
+        """由色号与角色(fg/bg)生成唯一tag名 避免与sel/m/cur冲突"""
+        return "color_" + (role or '') + color.lstrip('#')
+
+    @staticmethod
+    def _parse_color_term(term_text, default_color="#7E7A7A"):
+        """解析[-fg/bg@色号]正则 词条: -纯标色不入下拉 fg前景/bg背景(缺省按上下文) @仅匹配类名
+        [色号]须为合法#hex或[@](名匹配默认色) 否则视为普通正则(如字符类[0-9])返回None"""
+        m = re.match(r'^(?:\[(-)?(fg|bg)?(@?)([^\]]*)\]\s*)?(.*)$', term_text, re.IGNORECASE)
+        if not m or not m[5]: return None
+        exclude, role, name_only, color_raw, rule = m.groups()
+        if color_raw is None: return None  # 无[色号]前缀 普通词条
+        if not (ClassList._is_valid_color(color_raw) or (name_only and color_raw == '')): return None  # 内容非合法色号(如字符类[0-9])
+        color = color_raw if ClassList._is_valid_color(color_raw) else default_color
+        try: pattern = re.compile(rule)
+        except re.error: pattern = re.compile(re.escape(rule))
+        return ClassList.ColorTerm(color, pattern, rule, bool(name_only), (role or '').lower() or None, bool(exclude))
+
+    @staticmethod
+    def write_terms(items):
+        """词条列表 -> JSON字符串(配置存储用)"""
+        return json.dumps(list(items), ensure_ascii=False)
+
+    @staticmethod
+    def read_terms(raw):
+        """JSON字符串 -> 词条列表 非法/空值返回空列表"""
+        if not raw or not raw.strip(): return []
+        try:
+            v = json.loads(raw.strip())
+            if isinstance(v, list): return [str(x) for x in v if x != '']
+        except Exception:
+            pass
+        return []
+
+    @staticmethod
+    def _dropdown_term(term):
+        """下拉显示用: 去掉[色号]前缀仅留正则; 纯标色词条(色号前带-)返回None不入下拉"""
+        s = term.strip()
+        if not s.startswith('['): return term
+        ct = ClassList._parse_color_term(s)
+        if ct is None: return term  # 非色号词条(如正则字符类[0-9]) 原样返回
+        if ct.exclude: return None  # 纯标色 不入下拉
+        return ct.raw  # 去色号前缀仅留正则
+
     def _combo_values(self, fixed_terms, history):
-        """下拉词条: 自定义词条 + 分隔横线 + 历史(新记录排末尾)"""
-        fixed = list(fixed_terms)
+        """下拉词条: 自定义词条(去色号前缀,排除纯标色) + 分隔横线 + 历史(新记录排末尾)"""
+        fixed = [t for t in (self._dropdown_term(x) for x in fixed_terms) if t]
         slots = max(0, 20 - len(fixed))
         hist = [h for h in history if h not in fixed][-slots:] if slots else []
         sep = [self._SEP_LINE] if fixed and hist else []
@@ -96,18 +155,18 @@ class ClassList:
                     boxes.remove(w)
 
     def save_search_box_only(self):
-        """搜索词条对话框专用: 仅更新[SearchBox]段与search_cfg_editor窗口尺寸 其余配置原样保留"""
+        """局部保存: 仅更新[SearchBox]段与search_cfg_editor窗口尺寸 其余配置原样保留"""
         if not self.config_file: return
         try:
             raw = self.config_file.read_text('utf-8')
             pre, sep, rules = raw.partition('[RegexRules]')  # 正则段由regex_manager管理 原样切出
             cfg = configparser.ConfigParser(interpolation=None)
             cfg.read_string(pre)
-            esc = lambda items: '|'.join(t.replace('|', '\\|') for t in items)
             if geom := self.win_size._states.get('search_cfg_editor'):
                 if 'WinSize' not in cfg: cfg.add_section('WinSize')
                 cfg['WinSize']['search_cfg_editor'] = geom
-            cfg['SearchBox'] = {'text_terms': esc(self.text_search_terms), 'style_terms': esc(self.style_filter_terms)}
+            cfg['SearchBox'] = {'text_terms': self.write_terms(self.text_search_terms),
+                                'style_terms': self.write_terms(self.style_filter_terms)}
             import io
             with io.StringIO() as buf:
                 cfg.write(buf)
@@ -117,11 +176,22 @@ class ClassList:
             logger.info(f"搜索词条已保存(局部): {self.config_file}")
         except Exception as e: logger.error(f"保存搜索词条失败: {e}")
 
+    def ensure_default_terms(self):
+        """无[SearchBox]段时默认写入 opacity 灰字颜色词条"""
+        if not self.config_file: return
+        try:
+            if '[SearchBox]' in self.config_file.read_text('utf-8'): return  # 已有段不注入
+        except Exception: return
+        if self._DEFAULT_OPACITY_TERM not in self.text_search_terms:
+            self.text_search_terms.append(self._DEFAULT_OPACITY_TERM)
+        self.save_search_box_only()
+
+    _sash_cache = {}  # 分割栏位置内存记忆(跨实例 不落盘)
     def edit_search_cfg(self):
         """自定义搜索: 手动编辑正文搜索与样式筛选的下拉词条(保存写入当前配置)"""
         parent = getattr(self, '_cw', self.root)
         d = tk.Toplevel(parent)
-        d.title("自定义搜索词条"); d.transient(parent)
+        d.title("搜索备选词条与颜色标记"); d.transient(parent)
         if self.win_size:
             rec = self.win_size.setup(d, "search_cfg_editor", f"380x420+{self.root.winfo_x()+80}+{self.root.winfo_y()+80}", mode='cascade')
             d.bind('<Configure>', rec, add='+')
@@ -136,17 +206,64 @@ class ClassList:
             self.style_filter_terms[:] = read_terms(style_filter_box)
             self._refresh_search_boxes()
             self.save_search_box_only()  # 局部保存: 仅[SearchBox]段与search_cfg_editor 不影响其他
+            if cb := getattr(self, '_on_color_terms_changed', None): cb()  # 样式颜色重标 + 正文失效重渲染
             d.destroy()
         ttk.Button(row, text="保存", width=5, command=save_entries).pack(side="right")
         ttk.Button(row, text="关闭", width=5, command=d.destroy).pack(side="right", padx=(0, 5))
-        ttk.Label(d, text="正文搜索词条 (每行一条)").pack(side="top", anchor="w", padx=8, pady=(8, 0))
-        text_search_box = tk.Text(d, font=('Consolas', 10), undo=True, height=6)
-        text_search_box.pack(fill="both", expand=True, padx=8, pady=4)
+        pw_cfg = ttk.PanedWindow(d, orient="vertical"); pw_cfg.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        f1 = ttk.Frame(pw_cfg); pw_cfg.add(f1, weight=1)
+        ttk.Label(f1, text="正文搜索词条(每行一条;[fg/bg#色号]前景/背景,缺省时前景;[-色号]纯标色不入下拉;双击色号改色)").pack(side="top", anchor="w")
+        text_search_box = tk.Text(f1, font=('Consolas', 10), undo=True, height=6)
+        sb1 = ttk.Scrollbar(f1, command=text_search_box.yview); sb1.pack(side="right", fill="y")
+        text_search_box.config(yscrollcommand=sb1.set); text_search_box.pack(fill="both", expand=True)
         text_search_box.insert("1.0", "\n".join(self.text_search_terms))
-        ttk.Label(d, text="样式筛选词条 (每行一条)").pack(side="top", anchor="w", padx=8)
-        style_filter_box = tk.Text(d, font=('Consolas', 10), undo=True, height=6)
-        style_filter_box.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        f2 = ttk.Frame(pw_cfg); pw_cfg.add(f2, weight=1)
+        ttk.Label(f2, text="样式筛选词条(每行一条;[@色号]仅匹配类名,缺省时背景色;[-色号]纯标色不入下拉)").pack(side="top", anchor="w")
+        style_filter_box = tk.Text(f2, font=('Consolas', 10), undo=True, height=6)
+        sb2 = ttk.Scrollbar(f2, command=style_filter_box.yview); sb2.pack(side="right", fill="y")
+        style_filter_box.config(yscrollcommand=sb2.set); style_filter_box.pack(fill="both", expand=True)
         style_filter_box.insert("1.0", "\n".join(self.style_filter_terms))
+        if _sash := ClassList._sash_cache.get('search_cfg'):
+            d.after(100, lambda: pw_cfg.sashpos(0, int(_sash)))
+        pw_cfg.bind('<ButtonRelease-1>', lambda e: ClassList._sash_cache.update({'search_cfg': str(pw_cfg.sashpos(0))}) if pw_cfg.winfo_exists() else None)
+        # 色号标签按前景/背景渲染实际效果 双击弹调色板替换颜色
+        _CRE = re.compile(r'^\[(-)?(fg|bg)?(@?)(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}))?\]', re.IGNORECASE | re.MULTILINE)
+        def hl_color_tags(tb, default_role='fg'):
+            # 先清旧区间防残留(tag定义可复用)
+            for tag in tb.tag_names():
+                if tag.startswith('cfg_color_'):
+                    tb.tag_remove(tag, '1.0', 'end')
+            body = tb.get('1.0', 'end-1c')
+            for m in _CRE.finditer(body):
+                role = (m.group(2) or '').lower() or default_role
+                hex_c = (m.group(4) or '').upper()  # 无色号时空串: 仅占位标签供双击命中不渲染颜色
+                tag = f'cfg_color_{role}_{hex_c}'
+                if hex_c:  # 有效色号才配置颜色; 空[]/[fg]等仅加标签供双击触发调色板
+                    if role == 'bg':
+                        tb.tag_configure(tag, background=hex_c)
+                    else:  # fg
+                        tb.tag_configure(tag, foreground=hex_c)
+                tb.tag_add(tag, f'1.0 + {m.start()} chars', f'1.0 + {m.end()} chars')
+        def on_color_dblclick(tb, e, default_role='fg'):
+            idx = tb.index(f'@{e.x},{e.y}')
+            hit = [t for t in tb.tag_names(idx) if t.startswith('cfg_color_')]
+            if not hit: return
+            ranges = tb.tag_ranges(hit[0])
+            for i in range(0, len(ranges), 2):
+                if tb.compare(ranges[i], '<=', idx) and tb.compare(idx, '<', ranges[i+1]):
+                    m = _CRE.match(tb.get(ranges[i], ranges[i+1]))
+                    if not m: break
+                    prev = m.group(4)  # 已有色号(无色号时为None)
+                    _, hex_c = colorchooser.askcolor(parent=d, initialcolor=prev) if prev else colorchooser.askcolor(parent=d)
+                    if hex_c:
+                        new = f'[{m.group(1) or ""}{m.group(2) or ""}{m.group(3) or ""}{hex_c.upper()}]'
+                        tb.delete(ranges[i], ranges[i+1]); tb.insert(ranges[i], new); hl_color_tags(tb, default_role)
+                    break
+        # 正文搜索框缺省前景色 样式筛选框缺省背景色(与各自实际渲染一致)
+        for tb, dr in ((text_search_box, 'fg'), (style_filter_box, 'bg')):
+            hl_color_tags(tb, dr)
+            tb.bind('<Double-1>', lambda e, _tb=tb, _dr=dr: on_color_dblclick(_tb, e, _dr))
+            tb.bind('<KeyRelease>', lambda e, _tb=tb, _dr=dr: hl_color_tags(_tb, _dr))
 
     def show_class_list(self):
         cw = tk.Toplevel(self.root)
@@ -218,7 +335,7 @@ class ClassList:
                 logger.exception(f"保存epub失败: {e}"); messagebox.showerror("保存失败", str(e), parent=cw)
         
         ttk.Button(lf_top, text="保存", width=5, command=save_changes).pack(side="right")
-        ttk.Button(lf_top, text="搜索词条", width=8, command=self.edit_search_cfg).pack(side="right", padx=(0, 4))
+        ttk.Button(lf_top, text="词条/标色", width=8, command=self.edit_search_cfg).pack(side="right", padx=(0, 4))
         lf_tree_frame = ttk.Frame(lf); lf_tree_frame.pack(fill="both", expand=True, padx=(3, 0), pady=2)
         # 添加一个隐藏列用于右对齐显示图片计数，设置 width 并禁止拉伸
         ftree = ttk.Treeview(lf_tree_frame, show="tree", selectmode="extended", columns=("img_count",))
@@ -351,6 +468,17 @@ class ClassList:
         tree.config(yscrollcommand=vsb.set); tf.columnconfigure(0, weight=1); tf.rowconfigure(0, weight=1)
 
         ttk.Style().configure("Treeview", indent=8) #调整Treeview缩进余白
+        # py3.8/Tk8.6 Bug: Treeview map 的 ('!disabled','!selected') 条目覆盖 tag 颜色
+        try:
+            s = ttk.Style()
+            for opt in ('foreground', 'background'):
+                s.map('Treeview', opt, [e for e in (s.map('Treeview', opt) or []) if e[:2] != ('!disabled', '!selected')])
+            s.layout('ColorTV', s.layout('Treeview'))
+            s.layout('ColorTV.Item', s.layout('Treeview.Item'))
+            s.configure('ColorTV', indent=8, background='#ffffff', fieldbackground='#ffffff', borderwidth=0, foreground='black')
+            s.map('ColorTV', foreground=[('selected', '#ffffff')], background=[('selected', '#0078D7')])
+            tree.configure(style='ColorTV')
+        except Exception as e: logger.debug(f"Treeview 样式失败: {e}")
         # 默认展开控制
         nodes = {k: tree.insert("", "end", text=k, open=(k in ['Class列表', 'Span列表', '图片Class列表'])) for k in self.cats}
         class_to_iid = {}
@@ -393,7 +521,9 @@ class ClassList:
                 # 状态存储 (用于搜索) 
                 state = {"current_file": p, "results": [], "by_file": {}, "search_index": -1,
                          "last_q": None, "paint_token": 0, "painted": None, "file_pos": {},
-                         "html_cache": {}, "cache_order": [], "scanned_files": set(), "opacity_cache": {}}
+                         "html_cache": {}, "cache_order": [], "scanned_files": set(),
+                         "color_cache": {}, "color_tags": {}, "color_compiled": None,
+                         "color_terms_key": None, "color_painted": None}
 
                 # 性能优化: 兼容 py3.8，将绝对字符索引秒转为 Tkinter 的 "line.col" 格式，实现 O(1) 直接内存定位，彻底消灭 B-Tree 遍历卡顿
                 def to_tk_idx(pos, text): return "%d.%d" % (text.count('\n', 0, pos) + 1, pos - text.rfind('\n', 0, pos) - 1)
@@ -431,24 +561,60 @@ class ClassList:
                 sv = ttk.Scrollbar(win, command=txt.yview); txt.config(yscrollcommand=sv.set)
                 [f.pack(side=s, fill=y, expand=e) for f,s,y,e in [(sv,"right","y",0), (txt,"left","both",1)]]
                 [txt.tag_config(k, background=v) for k,v in [("m", "yellow"), ("cur", "orange")]]
-                # 匹配opacity块提供灰字高亮标签(之后估摸会做自定义列表?)
-                txt.tag_config("opacity_hint", foreground="#7E7A7A")
                 # sel(系统选中)提至最高优先级，避免选中标黄文本会难以辨别文字(白字黄底)
                 txt.tag_raise("sel")
 
-                # --- 异步多线程匹配：调用 workers_cfg 设置线程数并分块并行处理长文 ---
-                def async_render_opacity(content, fpath):
-                    if fpath in state["opacity_cache"]:
-                        matches = state["opacity_cache"][fpath]
-                        def apply_cached_batch(idx=0, step=200):
-                            if state.get("current_file") != fpath or idx >= len(matches): return
-                            batch = matches[idx:idx+step]
-                            # 使用 line.col 定位，消灭批量打标签时的卡顿
-                            indices = [v for s, e in batch for v in (to_tk_idx(s, content), to_tk_idx(e, content))]
-                            if indices: txt.tag_add("opacity_hint", *indices)
-                            win.after(15, apply_cached_batch, idx + step)
-                        win.after(0, apply_cached_batch)
-                        return
+                # --- 异步多线程颜色高亮：调用 workers_cfg 设置线程数并分块并行处理长文 ---
+                def async_render_colors(content, fpath):
+                    terms_key = tuple(self.text_search_terms)
+                    if state["color_terms_key"] != terms_key:
+                        state["color_terms_key"] = terms_key
+                        state["color_compiled"] = [ct for t in self.text_search_terms
+                                                   if t.strip().startswith('[') and (ct := self._parse_color_term(t.strip())) is not None]
+                        state["color_cache"].clear()
+                        state["color_painted"] = None
+                        # 主线程按色号与角色去重注册tag (仅词条变更时重建)
+                        tags = {}
+                        for ct in state["color_compiled"]:
+                            role = ct.role or 'fg'  # 预览默认前景色
+                            tag = self._color_tag_name(ct.color, role)
+                            tags[tag] = (ct.color, role)
+                        state["color_tags"] = tags
+                        for tag, (color, role) in tags.items():
+                            txt.tag_config(tag, **({'foreground': color} if role == 'fg' else {'background': color}))
+                    compiled = state["color_compiled"]
+                    if not compiled: return
+
+                    painted_key = (fpath, terms_key)
+                    if state["color_painted"] == painted_key: return
+
+                    # 相邻/重叠的同tag区间合并 不同tag(色号或角色不同)绝不合并 降区间数
+                    def _merge_color_ranges(matches):
+                        matches.sort(key=lambda x: (x[0], x[2]))
+                        merged = []
+                        for s, e, c in matches:
+                            if merged and merged[-1][2] == c and s <= merged[-1][1]:
+                                if e > merged[-1][1]: merged[-1] = (merged[-1][0], e, c)
+                            else: merged.append((s, e, c))
+                        return merged
+
+                    # 主线程分批渲染 (文件/词条变化则丢弃过期批)
+                    def paint(merged):
+                        if not merged or state.get("current_file") != fpath: return
+                        def apply_batch(idx=0, step=250):
+                            if state.get("current_file") != fpath or state.get("color_terms_key") != terms_key or idx >= len(merged): return
+                            batch = merged[idx:idx+step]
+                            by_tag = {}
+                            for s, e, tag in batch:
+                                by_tag.setdefault(tag, []).extend((to_tk_idx(s, content), to_tk_idx(e, content)))
+                            for tag, idxs in by_tag.items():
+                                txt.tag_add(tag, *idxs)
+                            if idx + step < len(merged): win.after(15, apply_batch, idx + step)
+                            else: state["color_painted"] = painted_key
+                        win.after(0, apply_batch)
+
+                    if fpath in state["color_cache"]:
+                        paint(state["color_cache"][fpath]); return
 
                     def task():
                         try:
@@ -456,14 +622,13 @@ class ClassList:
                             mw = getattr(self, 'workers_cfg', None)
                             if callable(mw): mw = mw()
                             max_workers = int(mw) if mw else 4
-                            
-                            pattern = re.compile(r'<(p|span|div|h[1-6])\b[^>]*\bstyle=[\'"][^\'"]*opacity:\s*0?\.\d+[^>]*>[\s\S]*?</\1>', re.IGNORECASE)
-                            matches = []
                             length = len(content)
-                            
+                            pt_tags = [(ct.pattern, self._color_tag_name(ct.color, ct.role or 'fg')) for ct in compiled]
                             # 短文本直接单线程，长文本利用线程池分块并行检索（带重叠区防跨行截断）
                             if length < 3000 or max_workers <= 1:
-                                matches = [(m.start(), m.end()) for m in pattern.finditer(content)]
+                                matches = []
+                                for pat, tag in pt_tags:
+                                    matches.extend((m.start(), m.end(), tag) for m in pat.finditer(content))
                             else:
                                 chunk_len = length // max_workers
                                 overlap = 2000 # 重叠区长度，防止跨行截断
@@ -471,37 +636,22 @@ class ClassList:
                                           min(length, (i + 1) * chunk_len + (overlap if i < max_workers - 1 else 0))) 
                                           for i in range(max_workers)]
                                 
-                                def search_chunk(sub_range):
+                                def search_chunk(sub_range, pat, tag):
                                     sub_start, sub_end = sub_range
                                     sub_str = content[sub_start:sub_end]
-                                    return [(sub_start + m.start(), sub_start + m.end()) for m in pattern.finditer(sub_str)]
+                                    return [(sub_start + m.start(), sub_start + m.end(), tag) for m in pat.finditer(sub_str)]
                                 
-                                from concurrent.futures import ThreadPoolExecutor
+                                matches = []
                                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                                    futures = [executor.submit(search_chunk, r) for r in ranges]
-                                    seen = set()
+                                    futures = [executor.submit(search_chunk, r, pat, tag) for pat, tag in pt_tags for r in ranges]
                                     for f in futures:
-                                        for gs, ge in f.result():
-                                            if (gs, ge) not in seen:
-                                                seen.add((gs, ge))
-                                                matches.append((gs, ge))
-                                    matches.sort(key=lambda x: x[0])
-
-                            state["opacity_cache"][fpath] = matches
-                            if not matches or state.get("current_file") != fpath: return
-                            
-                            # 回到主线程分批渲染Tag
-                            def apply_batch(idx=0, step=200):
-                                if state.get("current_file") != fpath or idx >= len(matches): return
-                                batch = matches[idx:idx+step]
-                                # 同样使用极速的 line.col 定位
-                                indices = [v for s, e in batch for v in (to_tk_idx(s, content), to_tk_idx(e, content))]
-                                if indices: txt.tag_add("opacity_hint", *indices)
-                                win.after(15, apply_batch, idx + step)
-                                
-                            win.after(0, apply_batch)
+                                        try: matches.extend(f.result())
+                                        except Exception as ex: logger.error(f"颜色词条匹配失败: {ex}")
+                            merged = _merge_color_ranges(matches)
+                            state["color_cache"][fpath] = merged
+                            paint(merged)
                         except Exception as ex:
-                            logger.error(f"异步多线程渲染 opacity 失败: {ex}")
+                            logger.error(f"异步多线程渲染颜色失败: {ex}")
 
                     from threading import Thread
                     Thread(target=task, daemon=True).start()
@@ -542,12 +692,12 @@ class ClassList:
                     
                     txt.config(state="normal"); txt.delete("1.0", "end"); txt.insert("1.0", content); txt.config(state="disabled")
                     
-                    # 触发异步多线程高亮 
-                    async_render_opacity(content, fpath)
+                    # 触发异步多线程颜色高亮 
+                    async_render_colors(content, fpath)
                     # 传入当前文本上下文供坐标极速转换
                     paint_m_async(content)
-                    
-                    [(ftree.selection_set(n), ftree.see(n)) for n in self.n_map.values() if n and ftree.exists(n) and ftree.item(n, "tags")[0] == fpath]
+                    for n in self.n_map.values():
+                        if n and ftree.exists(n) and ftree.item(n, "tags")[0] == fpath: ftree.selection_set(n); ftree.see(n)
 
                 # 高亮异步分批渲染: 接收传入的 content 文本以供行列计算
                 def paint_m_async(content):
@@ -572,7 +722,9 @@ class ClassList:
 
                 # 执行正则搜索定位，支持全局匹配与高亮
                 def do_find(rev=False, reset=False, navigate=True, force=False):
-                    q = se.get()
+                    raw = se.get()
+                    ct = ClassList._parse_color_term(raw) if raw.strip().startswith('[') else None
+                    q = ct.raw if ct else raw  # 去掉[色号]前缀仅按正则搜索
                     if not q:
                         # 清空查询: 取消挂起记录 清除高亮
                         hid = state.pop('hist_id', None)
@@ -597,58 +749,61 @@ class ClassList:
                             try: win.after_cancel(hid)
                             except Exception: pass
                         state.update({"last_q": q, "results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
-                    try:
-                        with zipfile.ZipFile(self.epub_path, "r") as z:
-                            nl = z.namelist()
-                            # 文件顺序改为跟随左侧文件树显示序(spine列表)
-                            if not state["file_pos"]:
-                                _order = []
-                                def _walk(item):
-                                    for c in ftree.get_children(item):
-                                        p = ftree.item(c, "tags")[0]
-                                        if not p.endswith('/'):
-                                            _order.append(p)
-                                        _walk(c)  # 目录节点递归下钻
-                                _walk("")
-                                seen = set(_order)
-                                # 兜底: 运行期新增、建树后未出现的html文件 按名称排序追加到末尾
-                                _order += sorted(f for f in set(nl) | set(self.modified_files.keys())
-                                                    if f.endswith((".html", ".xhtml")) and f not in seen)
-                                state["file_pos"] = {f: i for i, f in enumerate(_order) if f.endswith((".html", ".xhtml"))}
-                            # 非全局: 每次针对当前文件整体重建结果域(原"结果域过滤"紧跟清空=对空列表过滤空操作; ←→切文件时旧文件匹配残留进results 致跨文件乱跳/页尾滚屏)
-                            if not global_search_var.get():
-                                cf = state["current_file"]
-                                if cf and cf.endswith((".html", ".xhtml")) and (cf in nl or self.modified_files.get(cf) is not None):
-                                    spans = [m.span() for m in re.finditer(q, get_cached_content(cf, z))]
-                                    state["by_file"][cf] = spans
-                                    state["results"] = [(cf, s) for s in spans]
-                                    state["scanned_files"].add(cf)
+                    # 仅新查询/强制/当前文件未缓存时才扫描; 纯导航(同查询同文件)复用既有结果 跳过zip打开与finditer
+                    need_scan = is_new or state["current_file"] not in state["by_file"]
+                    if need_scan:
+                        try:
+                            with zipfile.ZipFile(self.epub_path, "r") as z:
+                                nl = z.namelist()
+                                # 文件顺序改为跟随左侧文件树显示序(spine列表)
+                                if not state["file_pos"]:
+                                    _order = []
+                                    def _walk(item):
+                                        for c in ftree.get_children(item):
+                                            p = ftree.item(c, "tags")[0]
+                                            if not p.endswith('/'):
+                                                _order.append(p)
+                                            _walk(c)  # 目录节点递归下钻
+                                    _walk("")
+                                    seen = set(_order)
+                                    # 兜底: 运行期新增、建树后未出现的html文件 按名称排序追加到末尾
+                                    _order += sorted(f for f in set(nl) | set(self.modified_files.keys())
+                                                        if f.endswith((".html", ".xhtml")) and f not in seen)
+                                    state["file_pos"] = {f: i for i, f in enumerate(_order) if f.endswith((".html", ".xhtml"))}
+                                # 非全局: 针对当前文件扫描(同查询已扫过则复用by_file 跳过finditer)
+                                if not global_search_var.get():
+                                    cf = state["current_file"]
+                                    if cf and cf.endswith((".html", ".xhtml")) and (cf in nl or self.modified_files.get(cf) is not None):
+                                        if cf not in state["by_file"]:
+                                            state["by_file"][cf] = [m.span() for m in re.finditer(q, get_cached_content(cf, z))]
+                                            state["scanned_files"].add(cf)
+                                        state["results"] = [(cf, s) for s in state["by_file"][cf]]
+                                    else:
+                                        state["results"] = []
                                 else:
-                                    state["results"] = []
-                            else:
-                                # 全局: 仅增量扫描未扫描过的文件
-                                cand = list(nl) + list(self.modified_files.keys())
-                                s_files = sorted({f for f in cand if f.endswith((".html", ".xhtml")) and (f in nl or self.modified_files.get(f) is not None)})
-                                new_matches = False
-                                for f in s_files:
-                                    if f not in state["scanned_files"]:
-                                        spans = [m.span() for m in re.finditer(q, get_cached_content(f, z))]
-                                        state["scanned_files"].add(f)
-                                        if spans:
-                                            state["by_file"][f] = spans
-                                            state["results"].extend((f, s) for s in spans)
-                                            new_matches = True
-                                if new_matches:
-                                    state["results"].sort(key=lambda x: (state["file_pos"].get(x[0], 9999), x[1]))
-                            # 全局扫描挤出LRU缓存(上限15)致content取空、高亮落1.0, 扫描后回读当前文件
-                            if state["current_file"] and state["current_file"] not in state["html_cache"]:
-                                get_cached_content(state["current_file"], z)
-                    except Exception as e:
-                        logger.error(f"正则搜索失败: {e}")
-                        # 中间态正则(如[^未闭合)报错直接返回, 清除过期高亮并重置绘制状态
-                        txt.tag_remove("m", "1.0", "end"); txt.tag_remove("cur", "1.0", "end")
-                        state.update({"results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
-                        return sl.config(text="Err")
+                                    # 全局: 仅增量扫描未扫描过的文件
+                                    cand = list(nl) + list(self.modified_files.keys())
+                                    s_files = sorted({f for f in cand if f.endswith((".html", ".xhtml")) and (f in nl or self.modified_files.get(f) is not None)})
+                                    new_matches = False
+                                    for f in s_files:
+                                        if f not in state["scanned_files"]:
+                                            spans = [m.span() for m in re.finditer(q, get_cached_content(f, z))]
+                                            state["scanned_files"].add(f)
+                                            if spans:
+                                                state["by_file"][f] = spans
+                                                state["results"].extend((f, s) for s in spans)
+                                                new_matches = True
+                                    if new_matches:
+                                        state["results"].sort(key=lambda x: (state["file_pos"].get(x[0], 9999), x[1]))
+                                # 全局扫描挤出LRU缓存(上限15)致content取空、高亮落1.0, 扫描后回读当前文件
+                                if state["current_file"] and state["current_file"] not in state["html_cache"]:
+                                    get_cached_content(state["current_file"], z)
+                        except Exception as e:
+                            logger.error(f"正则搜索失败: {e}")
+                            # 中间态正则(如[^未闭合)报错直接返回, 清除过期高亮并重置绘制状态
+                            txt.tag_remove("m", "1.0", "end"); txt.tag_remove("cur", "1.0", "end")
+                            state.update({"results": [], "by_file": {}, "search_index": -1, "painted": None, "scanned_files": set()})
+                            return sl.config(text="Err")
                     
                     res = state["results"]
                     content = state["html_cache"].get(state["current_file"], "")
@@ -705,8 +860,9 @@ class ClassList:
                         load_content_to_text(target_path)  # 跨文件跳转(仅↑↓全局导航时触发)
                     # 文件改变后必须重新拉取最新上下文才能保证坐标正确
                     content = state["html_cache"].get(state["current_file"], "")
-                    # 高亮并跳转到当前特定匹配项: 同样使用极速的 line.col 定位
-                    txt.tag_remove("cur", "1.0", "end")
+                    # 高亮并跳转到当前匹配项: 仅清旧cur区间(非全文) 避免大文本tag_remove全文卡顿
+                    _cr = txt.tag_ranges("cur")
+                    if _cr: txt.tag_remove("cur", _cr[0], _cr[-1])
                     txt.tag_add("cur", (s_idx := to_tk_idx(gs, content)), to_tk_idx(ge, content))
                     txt.see(s_idx)
                     # 黄底分批异步渲染
@@ -727,52 +883,77 @@ class ClassList:
                     ftree.selection_set(nxt); ftree.see(nxt)
                     load_content_to_text(ftree.item(nxt, "tags")[0])
                     do_find(reset=True, navigate=False)  # 只定位不高跳
-                def on_nav(rev, _e):
-                    if focus_in_search(): return
+                # 弹层(combobox下拉)是否展开: 用Tk内部PopdownWindow判定
+                def _popdown_mapped():
+                    try:
+                        return bool(int(se.tk.call('winfo', 'ismapped',
+                                    se.tk.call('::ttk::combobox::PopdownWindow', str(se)))))
+                    except Exception:
+                        return False
+                # ↑↓导航结果: 下拉展开时放行给combobox列表移动; 否则导航+break阻止combobox↓误触发popdown
+                def on_nav(rev, _e=None):
+                    if _popdown_mapped(): return
                     do_find(rev=rev)
+                    if focus_in_search(): _focus_txt()
+                    return "break"
                 win.bind("<Left>",  lambda e, r=1: on_switch(r, e))
                 win.bind("<Right>", lambda e, r=0: on_switch(r, e))
                 win.bind("<Up>",    lambda e, r=1: on_nav(r, e))
                 win.bind("<Down>",  lambda e, r=0: on_nav(r, e))
-                # 弹层展开时持全局grab吞掉正文Button-1; 改绑<<Unpost>>: 关闭时若指针在正文区则多档延迟夺焦(组合框Unpost后可能异步再抢); 列表选中时弹层也关闭, 用"最近选中"标记排除以保持搜索焦点
-                _sel_at = [0.0]
-                se.bind("<<ComboboxSelected>>", lambda e: _sel_at.__setitem__(0, time.monotonic()), add="+")
-                # 延迟夺焦带销毁防护: 预览窗关闭后挂起after仍触发, 对已销毁txt执行focus_set抛TclError, 先查存活
+                # se同绑: widget级break拦截combobox↓自动popdown
+                se.bind("<Up>",   lambda e: on_nav(True), add="+")
+                se.bind("<Down>", lambda e: on_nav(False), add="+")
+                # 夺焦到正文便于↑↓导航; Unpost后异步抢回防焦点丢失
                 def _grab_txt():
                     try:
                         if txt.winfo_exists(): txt.focus_set()
                     except tk.TclError: pass
+                def _focus_txt(delays=(10, 60, 150)):
+                    _grab_txt()
+                    for d in delays: win.after(d, _grab_txt)
                 def on_unpost(_e=None):
                     try:
-                        if not win.winfo_exists() or time.monotonic() - _sel_at[0] < 0.25: return
+                        if not win.winfo_exists(): return
                     except tk.TclError: return
                     mx, my = win.winfo_pointerxy()
+                    # 仅指针在正文区才夺焦(点文件树等外部时让焦点跟随点击目标)
                     if sf.winfo_rooty() + sf.winfo_height() <= my < win.winfo_rooty() + win.winfo_height() \
                        and win.winfo_rootx() <= mx < win.winfo_rootx() + win.winfo_width():
-                        _grab_txt()
-                        [win.after(d, _grab_txt) for d in (10, 60, 150)]
+                        _focus_txt()
                 se.bind("<<Unpost>>", on_unpost, add="+")
                 # 兜底:部分Tk版本点击外部关闭弹层不产生<<Unpost>> 轮询弹层mapped状态转移捕捉关闭时刻
                 def _poll_popdown():
                     try:
                         if not win.winfo_exists(): return
                     except tk.TclError: return
-                    try:
-                        mapped = bool(int(se.tk.call('winfo', 'ismapped',
-                                    se.tk.call('::ttk::combobox::PopdownWindow', str(se)))))
-                    except Exception:
-                        mapped = False
+                    mapped = _popdown_mapped()
                     if getattr(_poll_popdown, 'was', False) and not mapped: on_unpost(None)
                     _poll_popdown.was = mapped
                     win.after(100, _poll_popdown)
                 _poll_popdown()
-                # 防抖触发也改成 navigate=False(输入时只刷新高亮定位,不跳文件) 200ms防抖兼顾输入流畅与残留清理
+                # 输入防抖: 200ms停顿后刷新高亮定位
                 (ft := [0]) and se.bind("<KeyRelease>", lambda e: (win.after_cancel(ft[0]) if ft[0] else None, ft.__setitem__(0, win.after(200, lambda: do_find(reset=True, navigate=False)))))
                 
                 # 打开窗口默认焦点强行切到 txt(文本预览区域)
                 txt.focus_set()
                 win.after(100, lambda: txt.focus_set())
-                
+
+                # 词条变更刷新回调: 供 edit_search_cfg 保存后触发(样式重标 + 正文失效重渲染)
+                def on_terms_changed():
+                    paint_class_color()
+                    try:
+                        if not win.winfo_exists(): return
+                    except tk.TclError: return
+                    state.update(color_terms_key=None, color_compiled=None, color_painted=None)
+                    state["color_cache"].clear()
+                    for tag in state.get("color_tags", {}):
+                        try: txt.tag_remove(tag, "1.0", "end")
+                        except tk.TclError: pass
+                    state["color_tags"] = {}
+                    if (cf := state.get("current_file")) and cf in state["html_cache"]:
+                        async_render_colors(state["html_cache"][cf], cf)
+                self._on_color_terms_changed = on_terms_changed
+
                 load_content_to_text(p)
             except Exception as ex: 
                 logger.exception(f"预览文件时发生错误: {ex}")
@@ -923,11 +1104,30 @@ class ClassList:
                         if count % 10 == 0:
                             yield
                 yield # 每批次完成后交还UI控制权
+
+        # 样式筛选词条标色: 仅带[色号]前缀的词条参与标色 无前缀词条仅用于筛选
+        def paint_class_color():
+            terms = [ct for t in self.style_filter_terms
+                     if t.strip().startswith('[') and (ct := self._parse_color_term(t.strip())) is not None]
+            for ct in terms:
+                role = ct.role or 'bg'  # 类列表默认背景色
+                tree.tag_configure(self._color_tag_name(ct.color, role), **({'foreground': ct.color} if role == 'fg' else {'background': ct.color}))
+            for _, cls, iid in self.all_items_refs:
+                color = crole = None
+                if terms:
+                    css_texts = [rule['selector'] + rule['content'] for rules in self.style_data.get(cls, {}).values() for rule in rules]
+                    full_text = cls + ("\n" + "\n".join(css_texts) if css_texts else "")
+                    for ct in terms:
+                        if ct.pattern.search(cls if ct.name_only else full_text):
+                            color, crole = ct.color, ct.role or 'bg'; break
+                tree.item(iid, tags=(self._color_tag_name(color, crole),) if color else ())
+            apply_sort()
+
         gen = parse_gen()
         def run_step(): # 递归调用生成器分步处理
             if self._running:
                 try: next(gen); self._after_id = cw.after(1, run_step) # 只记录最新一个定时器id：链式调度下任意时刻仅一个存活
-                except StopIteration: pass # 正常结束，静默处理
+                except StopIteration: paint_class_color() # 解析完成 全量标色
                 except Exception: logger.exception("class_list run_step 发生异常")
         run_step()
 
@@ -945,6 +1145,9 @@ class ClassList:
             ts = [tk.Text(f := ttk.Frame(pw), height=1, font=('Consolas', 10 if i==0 else 9), bg="#ffffff" if i==0 else "#f9f9f9", wrap="word") for i in range(2)]
             [ (pw.add(t.master, weight=w), (v := ttk.Scrollbar(t.master, command=t.yview)).pack(side="right", fill="y"), 
                t.config(yscrollcommand=v.set), t.pack(side="left", fill="both", expand=True)) for t, w in zip(ts, [6, 10]) ]
+            if _sash := ClassList._sash_cache.get('class_list_details'):
+                win.after(100, lambda: pw.sashpos(0, int(_sash)))
+            pw.bind('<ButtonRelease-1>', lambda e: ClassList._sash_cache.update({'class_list_details': str(pw.sashpos(0))}) if pw.winfo_exists() else None)
             def update_view():
                 name = tree.item(tree.selection()[0], "text"); win.title(name)
                 rules = [f"文件: {p}\n{r['selector']} {{\n" + "\n".join(f"  {l.strip()}" for l in r['content'].split('\n') if l.strip()) + "\n}" 
@@ -1029,17 +1232,18 @@ class ClassList:
         _filter_hist_id = [None]; _last_filter_q = [None]
         def do_filter(*_):
             keyword = filter_var.get().strip()
-            try: match = (lambda s: re.search(keyword, s, re.IGNORECASE)) if keyword else None
-            except re.error: match = lambda s: keyword.lower() in s.lower()
+            ct = ClassList._parse_color_term(keyword) if keyword.startswith('[') else None
+            regex = ct.raw if ct else keyword
+            name_only = bool(ct and ct.name_only)
+            try: match = (lambda s: re.search(regex, s, re.IGNORECASE)) if regex else None
+            except re.error: match = lambda s: regex.lower() in s.lower()
             tree.selection_remove(tree.selection())
             for group, cls, iid in self.all_items_refs:
                 tree.detach(iid)
-                # 提取所有相关的 CSS 文本
-                css_texts = [rule['selector'] + rule['content'] for rules in self.style_data.get(cls, {}).values() for rule in rules]
-                # 执行综合匹配：关键词为空、匹配类名或匹配 CSS 内容
+                css_texts = [] if name_only else [rule['selector'] + rule['content'] for rules in self.style_data.get(cls, {}).values() for rule in rules]
                 if not keyword or match(cls) or any(match(t) for t in css_texts):
                     tree.reattach(iid, nodes[group], "end")
-            apply_sort()  # 筛选/清空后保持排序 未点过表头则按默认类名升序(与初始一致)
+            paint_class_color()  # 筛选/清空后重标颜色+排序(paint_class_color末尾调apply_sort)
             # 延迟记录筛选历史(新查询1秒后记录 与正文搜索一致)
             if keyword != _last_filter_q[0]:
                 _last_filter_q[0] = keyword
