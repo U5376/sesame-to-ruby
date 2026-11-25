@@ -438,6 +438,8 @@ class EpubProcessor:
         # 搜索框下拉词条: 内存记忆为主 不自动保存 仅手动保存(自定义搜索对话框或主程序保存按钮)时写入config
         self.text_search_terms, self.style_filter_terms = [], []
         self.text_search_history, self.style_filter_history = [], []
+        self.replace_history = []  # 替换框独立历史(关class窗口局部落盘[SearchBox].replace_history)
+        self._search_state = {'replace_mode': False, 'global_match': False}  # 替换模式/全局匹配状态记忆
         self.log_level_var = self._settings_vars_dict.setdefault('log_level', tk.StringVar(value="info"))
         self.load_app_settings()
         recorder = self.win_size.setup(root, "main", "350x620+600+160")
@@ -1230,7 +1232,9 @@ class EpubProcessor:
                   self.win_size,
                   self.text_search_terms, self.style_filter_terms,
                   self.config_file,
-                  self.text_search_history, self.style_filter_history)
+                  self.text_search_history, self.style_filter_history,
+                  getattr(self, 'tag_menu_terms', None),
+                  getattr(self, 'replace_history', None), getattr(self, '_search_state', None))
 
     def save_app_settings(self, return_config=False):
         """保存到配置文件，或返回ConfigParser对象"""
@@ -1239,9 +1243,15 @@ class EpubProcessor:
         if self.win_size._states: self.win_size.save(config)
         if entries := getattr(self, 'excluded_toc_entries', []):
             config['ExcludeTocEntries'] = {str(i): f"{t}|{h}" for i, (t, h) in enumerate(entries)}
-        if getattr(self, 'text_search_terms', None) or getattr(self, 'style_filter_terms', None):
+        if getattr(self, 'text_search_terms', None) or getattr(self, 'style_filter_terms', None) or getattr(self, 'tag_menu_terms', None) \
+                or getattr(self, 'text_search_history', None) or getattr(self, 'replace_history', None):
             config['SearchBox'] = {'text_terms': ClassList.write_terms(self.text_search_terms),
-                                   'style_terms': ClassList.write_terms(self.style_filter_terms)}
+                                   'style_terms': ClassList.write_terms(self.style_filter_terms),
+                                   'tag_terms': ClassList.write_terms(getattr(self, 'tag_menu_terms', None) or ['h3','p','span']),
+                                   'search_history': ClassList.write_terms(getattr(self, 'text_search_history', [])[-10:]),
+                                   'replace_history': ClassList.write_terms(getattr(self, 'replace_history', [])[-10:]),
+                                   'replace_mode': '1' if getattr(self, '_search_state', {}).get('replace_mode') else '0',
+                                   'global_match': '1' if getattr(self, '_search_state', {}).get('global_match') else '0'}
         if return_config: return config
         try:
             import io
@@ -1268,6 +1278,11 @@ class EpubProcessor:
             if 'SearchBox' in config:
                 self.text_search_terms = ClassList.read_terms(config['SearchBox'].get('text_terms', ''))
                 self.style_filter_terms = ClassList.read_terms(config['SearchBox'].get('style_terms', ''))
+                self.tag_menu_terms = ClassList.read_terms(config['SearchBox'].get('tag_terms', '')) or ['h3', 'p', 'span']
+                self.text_search_history = ClassList.read_terms(config['SearchBox'].get('search_history', ''))
+                self.replace_history = ClassList.read_terms(config['SearchBox'].get('replace_history', ''))
+                self._search_state = {'replace_mode': config['SearchBox'].getboolean('replace_mode', False),
+                                      'global_match': config['SearchBox'].getboolean('global_match', False)}
             if hasattr(self, 'regex_manager'): self.regex_manager.set_log_level(self.log_level_var.get())
             logger.info(f"加载配置:[{self.log_level_var.get()}] {self.config_file}")
         except Exception as e: logger.error(f"加载配置失败: {e}")
@@ -1330,6 +1345,31 @@ if __name__ == "__main__":
     logger.info("程序初始化")
     root = TkinterDnD.Tk()
     processor = EpubProcessor(root)
+    def on_app_close():
+        """主程序关闭: 先走各Toplevel(class窗口等)自身关闭协议(定时器清理/搜索历史局部保存),
+        再递归解绑<Destroy>阻断tkdnd已删Tcl命令的二次deletecommand, 最后逐个容错销毁。
+        直接root.destroy()级联销毁会在class窗口/预览窗的tkdnd组件处中途抛
+        "can't delete Tcl command"中断销毁(同class_list.on_class_list_close的既有修复)"""
+        for c in list(root.children.values()):
+            if isinstance(c, tk.Toplevel):
+                try:
+                    h = c.tk.call('wm', 'protocol', c._w, 'WM_DELETE_WINDOW')  # 查询已注册的关闭协议处理器
+                    if h: c.tk.call(h)  # class窗口等走自身清理流程(内部已容错 且会销毁自身)
+                except Exception: pass
+        def _unbind_destroy_recursive(w):
+            for c in w.winfo_children():
+                try: c.unbind('<Destroy>')
+                except Exception: pass
+                _unbind_destroy_recursive(c)
+        try: root.unbind('<Destroy>')
+        except Exception: pass
+        _unbind_destroy_recursive(root)
+        for c in list(root.children.values()):
+            try: c.destroy()
+            except tk.TclError: pass
+        try: root.destroy()
+        except tk.TclError as e: logger.warning(f"主窗口销毁告警(可忽略): {e}")
+    root.protocol("WM_DELETE_WINDOW", on_app_close)
     atexit.register(lambda: [shutil.rmtree(d, ignore_errors=True) for d in getattr(processor, '_exclude_tempdirs', set())])
     logger.info("进入主循环")
     root.mainloop()
